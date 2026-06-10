@@ -1,0 +1,28 @@
+[package]
+name = "synapse-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris Cousens"]
+description = "Synapse ADE core engine: roles, teams, orchestration, isolation, observability."
+
+# Vendored into the SynapseApp repo so the suite app is self-contained (like
+# ClaudeConnect / HyperMD) — no build-time dependency on the private
+# Adlistic/Synapse repo. Keep in sync with crates/synapse-core in Adlistic/Synapse.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+anyhow = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+parking_lot = "0.12"
+indexmap = { version = "2", features = ["serde"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["registry", "fmt", "env-filter", "ansi", "std"] }
+tracing-appender = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

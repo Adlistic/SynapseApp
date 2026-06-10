@@ -28,10 +28,9 @@ arboard = "3"
 keyring = "3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
 uuid = { version = "1", features = ["v4"] }
-# synapse-core lives in the public Adlistic/Synapse repo (workspace member). The
-# git dependency keeps this app buildable on CI/clean machines — no reliance on a
-# local D:\Development\Synapse checkout.
-synapse-core = { git = "https://github.com/Adlistic/Synapse", package = "synapse-core" }
+# synapse-core is vendored into this repo (../synapse-core) so the app is
+# self-contained — no build-time dependency on the private Adlistic/Synapse repo.
+synapse-core = { path = "../synapse-core" }
 
 [profile.release]
 opt-level = "s"

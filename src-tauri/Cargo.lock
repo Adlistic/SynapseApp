@@ -3953,7 +3953,6 @@ dependencies = [
 [[package]]
 name = "synapse-core"
 version = "0.1.0"
-source = "git+https://github.com/Adlistic/Synapse#a54ea4139d5d27ca1197c44616f324a91f27a063"
 dependencies = [
  "anyhow",
  "indexmap 2.14.0",

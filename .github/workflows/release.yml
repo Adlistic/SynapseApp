@@ -33,6 +33,13 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
+      # The rust-cache can restore a stale target/release/bundle from an earlier
+      # build (e.g. MSI artifacts). Their leftover .sig files make tauri-action
+      # see multiple updater signatures and skip latest.json. Start clean.
+      - name: Remove stale bundles
+        shell: pwsh
+        run: if (Test-Path src-tauri/target/release/bundle) { Remove-Item -Recurse -Force src-tauri/target/release/bundle }
+
       - name: Build, sign, and publish (Tauri)
         uses: tauri-apps/tauri-action@v0
         env:

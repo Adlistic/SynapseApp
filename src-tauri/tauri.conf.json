@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Synapse",
+  "version": "0.1.0",
+  "identifier": "com.adlistic.synapse",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1421",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Synapse — Claude Code Workspace",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 1000,
+        "minHeight": 640
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["synapse"]
+      }
+    },
+    "updater": {
+      "createUpdaterArtifacts": true,
+      "endpoints": [
+        "https://github.com/Adlistic/SynapseApp/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY2OEMyQkY3QkQxRjg3ODIKUldTQ2h4Kzk5eXVNWm1uc2pLd0xnQURwRGxuNTEyb21SK3VydS9KaE4zWVd5TUFKTEdVRlBxazkK"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

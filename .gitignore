@@ -1,0 +1,16 @@
+# Node / Vite
+node_modules
+dist
+*.local
+
+# Rust / Tauri
+src-tauri/target
+src-tauri/gen
+
+# Tauri updater signing key — NEVER commit. Lives only locally + as a CI secret.
+src-tauri/.tauri-updater.key
+src-tauri/.tauri-updater.key.pub
+
+# Logs / scratch
+*.log
+.synapse2/

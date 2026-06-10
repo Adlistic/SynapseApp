@@ -20,12 +20,52 @@ use serde_json::{json, Value};
 const HV_BASE: &str = "https://hypervoice.app";
 const APP: &str = "synapse";
 
-// OS keyring slot for the linked HyperVoice user token.
+// OS keyring slots for the linked HyperVoice user token + a stable device id.
 const KEYRING_SERVICE: &str = "com.adlistic.synapse";
 const KEYRING_USER: &str = "hypervoice_user_token";
+const KEYRING_MACHINE: &str = "synapse_machine_id";
 
 fn keyring_entry() -> Result<keyring::Entry, String> {
     keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| e.to_string())
+}
+
+/// A stable per-install device id (persisted in the OS keyring), required by
+/// the `/api/claim` finalize call and the suite's per-device limit.
+fn machine_id() -> String {
+    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_MACHINE) {
+        if let Ok(id) = entry.get_password() {
+            if !id.is_empty() {
+                return id;
+            }
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let _ = entry.set_password(&id);
+        return id;
+    }
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// Finalize the claim: bind the token to this device and stamp `claimed_at`
+/// server-side. Until this runs, `/api/desktop/entitlements` returns 409
+/// ("User token not linked"). Idempotent for the same machine.
+async fn finalize_claim(client: &reqwest::Client, token: &str) -> Result<(), String> {
+    let url = format!("{HV_BASE}/api/claim");
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({ "token": token, "machine_id": machine_id() }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.status().is_success() {
+        return Ok(());
+    }
+    let status = resp.status().as_u16();
+    let body: Value = resp.json().await.unwrap_or_else(|_| json!({}));
+    Err(format!(
+        "claim {} {}",
+        status,
+        body.get("error").and_then(Value::as_str).unwrap_or("")
+    ))
 }
 
 /// Persist the linked user token in the OS credential store.
@@ -94,12 +134,19 @@ pub async fn get_entitlement() -> Result<Value, String> {
         return Ok(json!({ "linked": false }));
     };
 
-    let url = format!("{HV_BASE}/api/desktop/entitlements");
     let client = reqwest::Client::builder()
         .user_agent("Synapse-Suite")
         .build()
         .map_err(|e| e.to_string())?;
 
+    // Finalize the claim (sets claimed_at) before checking entitlement —
+    // otherwise the endpoint 409s and the app looks like it has no access.
+    // Idempotent for this device, so it's safe to run on every check.
+    if let Err(e) = finalize_claim(&client, &token).await {
+        tracing::warn!(target: "synapse2", error = %e, "claim finalize failed");
+    }
+
+    let url = format!("{HV_BASE}/api/desktop/entitlements");
     let resp = client
         .get(&url)
         .header("X-User-Token", &token)

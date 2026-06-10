@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-06-10
+
+### Fixed
+- **"Your plan doesn't include Suite access" for valid Pro/Lifetime accounts.**
+  The deep-link token was received but never *finalized* — the app didn't call
+  `POST /api/claim`, so `claimed_at` stayed null and `/api/desktop/entitlements`
+  returned 409 (read as "no access"). `get_entitlement` now finalizes the claim
+  (binds a persistent device id, stamps `claimed_at`) before checking
+  entitlement. Idempotent and self-healing for already-stored tokens.
+
 ## [0.1.1] — 2026-06-10
 
 ### Fixed

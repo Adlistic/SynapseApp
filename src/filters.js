@@ -65,7 +65,15 @@ export const DEFAULT_FILTERS = {
   backgroundColor: { h: 222, s: 47, l: 11 },
   warpSpeed: 1, // aurora blob speed: 0 (off) | 0.5 | 1 | 2 | 4
   tabPosition: "top", // "top" | "left"
+  showComposer: false, // input box under the terminal (off = type in the console)
+  theme: "dark", // "dark" | "light" | "system"
+  accent: null, // custom accent hex (null = palette default)
 };
+
+// Accent presets (applied to --accent). First = the HyperVoice brand default
+// (sky blue); the rest are brand + suite colors: orange, gold, green, the
+// desktop-app blue and violet.
+export const ACCENT_PRESETS = ["#27B8FD", "#F97316", "#FFC700", "#22C55E", "#3B82F6", "#7C3AED"];
 
 // Background presets (ClaudeConnect's dark-tone set).
 export const BG_PRESETS = [
@@ -102,6 +110,79 @@ export function addRecentFolder(path) {
     return list;
   } catch {
     return loadRecentFolders();
+  }
+}
+
+// --- Theme-aware display colors ---------------------------------------------
+// The kind/category palette is tuned for dark backgrounds. On white, scaling
+// brightness turns warm hues to mud — instead keep the hue, clamp lightness.
+function hexParts(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec((hex || "").trim());
+  if (!m) return { h: 220, s: 20, l: 50 };
+  const n = parseInt(m[1], 16);
+  const r = ((n >> 16) & 255) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0, s = 0; const l = (max + min) / 2;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60;
+  }
+  return { h: Math.round(h), s: Math.round(s * 100), l: Math.round(l * 100) };
+}
+
+// Text/border color readable on the current surface.
+export function displayColor(hex, light) {
+  if (!light) return hex;
+  const { h, s } = hexParts(hex);
+  return `hsl(${h} ${Math.min(Math.round(s * 1.2), 90)}% 34%)`;
+}
+
+// Badge styling for the tool pills: tinted background + readable text/border
+// in BOTH themes (dark keeps the original hue; light gets a deep variant).
+export function pillStyle(hex, light) {
+  const { h, s, l } = hexParts(hex);
+  if (light) {
+    const ds = Math.min(Math.round(s * 1.2), 90);
+    return {
+      color: `hsl(${h} ${ds}% 32%)`,
+      borderColor: `hsl(${h} ${ds}% 60% / 0.7)`,
+      background: `hsl(${h} ${ds}% 50% / 0.09)`,
+    };
+  }
+  return {
+    color: hex,
+    borderColor: `hsl(${h} ${s}% ${l}% / 0.55)`,
+    background: `hsl(${h} ${s}% ${l}% / 0.08)`,
+  };
+}
+
+// --- Custom session titles (sessionId → name) -------------------------------
+const TITLES_KEY = "synapse2.titles.v1";
+
+export function loadTitles() {
+  try {
+    const raw = localStorage.getItem(TITLES_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    return map && typeof map === "object" ? map : {};
+  } catch {
+    return {};
+  }
+}
+
+// Save (or clear, when name is empty) a custom title; returns the new map.
+export function saveTitle(sessionId, name) {
+  try {
+    const map = loadTitles();
+    if (name) map[sessionId] = name;
+    else delete map[sessionId];
+    localStorage.setItem(TITLES_KEY, JSON.stringify(map));
+    return { ...map };
+  } catch {
+    return loadTitles();
   }
 }
 

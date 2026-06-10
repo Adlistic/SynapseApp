@@ -1,5 +1,9 @@
-import { useEffect, useState } from "react";
-import { TOOL_CATS, BG_PRESETS, KIND_COLOR } from "./filters.js";
+import { useEffect, useMemo, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
+import { TOOL_CATS, BG_PRESETS, ACCENT_PRESETS, KIND_COLOR } from "./filters.js";
+import { checkForUpdatesManual } from "./updater.js";
+
+// ─── helpers ────────────────────────────────────────────────────────────────
 
 // HSL <-> hex for the native color input (we store background color as HSL to
 // match the presets; the <input type=color> works in hex).
@@ -29,50 +33,152 @@ function hexToHsl(hex) {
   return { h: Math.round(h), s: Math.round(s * 100), l: Math.round(l * 100) };
 }
 
+// ─── primitives ─────────────────────────────────────────────────────────────
+
 function Toggle({ checked, onChange }) {
   return (
     <button
       type="button"
-      className={"sw" + (checked ? " on" : "")}
+      className={"sm-sw" + (checked ? " on" : "")}
       onClick={(e) => { e.stopPropagation(); onChange(!checked); }}
       role="switch"
       aria-checked={checked}
     >
-      <span className="sw-knob" />
+      <span className="sm-sw-knob" />
     </button>
   );
 }
 
-function Row({ color, label, hint, checked, onChange }) {
+// One setting row: label + description on the left, the control on the right.
+function Item({ label, hint, color, control, onClick, children }) {
   return (
-    <div className="srow" onClick={() => onChange(!checked)}>
-      <span className="srow-dot" style={{ background: color }} />
-      <span className="srow-main">
-        <span className="srow-label">{label}</span>
-        {hint && <span className="srow-hint">{hint}</span>}
-      </span>
-      <Toggle checked={checked} onChange={onChange} />
+    <div className={"sm-item" + (onClick ? " clickable" : "")} onClick={onClick}>
+      <div className="sm-item-info">
+        <div className="sm-item-label">
+          {color && <span className="sm-dot" style={{ background: color }} />}
+          {label}
+        </div>
+        {hint && <div className="sm-item-hint">{hint}</div>}
+      </div>
+      <div className="sm-item-control">{control || children}</div>
     </div>
   );
 }
 
-function Segmented({ label, hint, value, options, onChange }) {
+function ToggleItem({ label, hint, color, checked, onChange }) {
   return (
-    <div className="seg-row">
-      <span className="seg-info">
-        <span className="srow-label">{label}</span>
-        {hint && <span className="srow-hint">{hint}</span>}
-      </span>
-      <div className="seg">
-        {options.map((o) => (
-          <button key={String(o.v)} className={"seg-btn" + (value === o.v ? " on" : "")} onClick={() => onChange(o.v)}>
-            {o.l}
-          </button>
-        ))}
-      </div>
+    <Item
+      label={label}
+      hint={hint}
+      color={color}
+      onClick={() => onChange(!checked)}
+      control={<Toggle checked={checked} onChange={onChange} />}
+    />
+  );
+}
+
+function Seg({ value, options, onChange }) {
+  return (
+    <div className="sm-seg">
+      {options.map((o) => (
+        <button
+          key={String(o.v)}
+          className={"sm-seg-btn" + (value === o.v ? " on" : "")}
+          onClick={() => onChange(o.v)}
+        >
+          {o.l}
+        </button>
+      ))}
     </div>
   );
 }
+
+// A card grouping related settings, with a heading outside the card.
+function Group({ title, desc, actions, children, visible = true }) {
+  if (!visible) return null;
+  return (
+    <section className="sm-group">
+      <div className="sm-group-head">
+        <div>
+          <h4 className="sm-group-title">{title}</h4>
+          {desc && <div className="sm-group-desc">{desc}</div>}
+        </div>
+        {actions && <div className="sm-group-actions">{actions}</div>}
+      </div>
+      <div className="sm-card">{children}</div>
+    </section>
+  );
+}
+
+// Visual theme picker — mini window previews, Linear/GitHub style.
+function ThemeCards({ value, onChange }) {
+  const themes = [
+    { v: "dark", l: "Dark", bg: "#0b1120", panel: "#19233c", line: "#33425f", text: "#d9e4ff" },
+    { v: "light", l: "Light", bg: "#f2f5fb", panel: "#ffffff", line: "#c6d3e8", text: "#101a2e" },
+    { v: "system", l: "System", split: true },
+  ];
+  const mini = (t, half) => (
+    <div className="sm-mini" style={{ background: t.bg, borderColor: t.line, ...(half ? { width: "50%" } : {}) }}>
+      <div className="sm-mini-bar" style={{ background: t.panel, borderColor: t.line }}>
+        <span style={{ background: "#f97316" }} />
+        <span style={{ background: "#ffc700" }} />
+        <span style={{ background: "#22c55e" }} />
+      </div>
+      <div className="sm-mini-body">
+        <div className="sm-mini-line" style={{ background: "#27b8fd", width: "55%" }} />
+        <div className="sm-mini-line" style={{ background: t.line, width: "85%" }} />
+        <div className="sm-mini-line" style={{ background: t.line, width: "70%" }} />
+      </div>
+    </div>
+  );
+  return (
+    <div className="sm-themes">
+      {themes.map((t) => (
+        <button
+          key={t.v}
+          className={"sm-theme" + (value === t.v ? " on" : "")}
+          onClick={() => onChange(t.v)}
+        >
+          <div className="sm-theme-preview">
+            {t.split ? (
+              <div className="sm-mini-split">
+                {mini(themes[0], true)}
+                {mini(themes[1], true)}
+              </div>
+            ) : (
+              mini(t)
+            )}
+          </div>
+          <div className="sm-theme-name">
+            <span className={"sm-radio" + (value === t.v ? " on" : "")} />
+            {t.l}
+          </div>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function Swatches({ items, isOn, onPick, custom }) {
+  return (
+    <div className="sm-swatches">
+      {items.map((it) => (
+        <button
+          key={it.key}
+          className={"sm-swatch" + (isOn(it) ? " on" : "")}
+          title={it.title}
+          style={{ background: it.css }}
+          onClick={() => onPick(it)}
+        >
+          {isOn(it) && <span className="sm-swatch-check">✓</span>}
+        </button>
+      ))}
+      {custom}
+    </div>
+  );
+}
+
+// ─── data ───────────────────────────────────────────────────────────────────
 
 const CONVO = [
   { key: "user", label: "User prompts", hint: "Your messages", color: KIND_COLOR.user },
@@ -86,18 +192,71 @@ const RESULTS = [
   { key: "error", label: "Errors", hint: "Failed tool invocations", color: KIND_COLOR.error },
 ];
 
-const TABS = [
-  { key: "appearance", label: "Appearance", icon: "🎨" },
-  { key: "filters", label: "Filters", icon: "▦" },
-  { key: "launch", label: "Launch", icon: "⌂" },
+const NAV = [
+  { key: "appearance", label: "Appearance", icon: "◐", desc: "Theme, accent, background" },
+  { key: "conversation", label: "Conversation", icon: "❯", desc: "Which messages appear" },
+  { key: "tools", label: "Tool calls", icon: "⚒", desc: "Category visibility" },
+  { key: "workspace", label: "Workspace", icon: "⌂", desc: "Launch, tabs, terminal" },
+  { key: "about", label: "About", icon: "ⓘ", desc: "Version & updates" },
 ];
+// Old keys still arrive from callers.
+const LEGACY = { filters: "conversation", launch: "workspace" };
+
+// ─── about / updates ────────────────────────────────────────────────────────
+
+function About() {
+  const [version, setVersion] = useState("");
+  const [state, setState] = useState(null);
+  useEffect(() => { getVersion().then(setVersion).catch(() => {}); }, []);
+  async function run() {
+    setState("checking");
+    setState(await checkForUpdatesManual());
+  }
+  return (
+    <>
+      <Item
+        label="Version"
+        hint="Synapse — Claude Code Workspace"
+        control={<span className="sm-version">{version ? `v${version}` : "—"}</span>}
+      />
+      <Item
+        label="Updates"
+        hint={
+          state && state !== "checking"
+            ? state.status === "uptodate"
+              ? "✓ You're on the latest version"
+              : state.status === "installing"
+              ? `Updating to ${state.version}…`
+              : `Couldn't check: ${state.message}`
+            : "Installed updates apply on relaunch"
+        }
+        control={
+          <button className="sm-btn" onClick={run} disabled={state === "checking"}>
+            {state === "checking" ? "Checking…" : "Check for updates"}
+          </button>
+        }
+      />
+      <Item
+        label="Data"
+        hint="Settings live in this app only; transcripts stay in ~/.claude"
+        control={<span className="sm-muted-note">Local only</span>}
+      />
+    </>
+  );
+}
+
+// ─── the modal ──────────────────────────────────────────────────────────────
 
 export default function SettingsModal({ open, onClose, filters, setFlag, setCat, setAllCats, reset, initialTab = "appearance" }) {
-  const [tab, setTab] = useState(initialTab);
-  const [catsOpen, setCatsOpen] = useState(false);
+  const [tab, setTab] = useState(LEGACY[initialTab] || initialTab);
+  const [query, setQuery] = useState("");
 
-  // Land on the requested tab each time the modal opens (Filters button → Filters).
-  useEffect(() => { if (open) setTab(initialTab || "appearance"); }, [open, initialTab]);
+  useEffect(() => {
+    if (open) {
+      setTab(LEGACY[initialTab] || initialTab || "appearance");
+      setQuery("");
+    }
+  }, [open, initialTab]);
 
   useEffect(() => {
     if (!open) return;
@@ -106,142 +265,242 @@ export default function SettingsModal({ open, onClose, filters, setFlag, setCat,
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
+  const q = query.trim().toLowerCase();
+  const searching = q.length >= 2;
+  const hit = (...texts) => !searching || texts.join(" ").toLowerCase().includes(q);
+
+  // Which nav sections contain a match (used to filter the rail while searching).
+  const sectionHits = useMemo(() => ({
+    appearance: hit("theme dark light system accent color background aurora speed"),
+    conversation: hit(CONVO.concat(RESULTS).map((r) => r.label + " " + r.hint).join(" ")),
+    tools: hit("tool calls categories filtered display dot pill hidden " + TOOL_CATS.map((c) => c.label).join(" ")),
+    workspace: hit("recent folders launch tabs position composer terminal dictation prompt"),
+    about: hit("version updates check data local"),
+  }), [q]);
+
   if (!open) return null;
+
   const onCount = Object.values(filters.toolCategories).filter(Boolean).length;
   const bgMode = filters.backgroundMode || "none";
+  const showSection = (key) => (searching ? sectionHits[key] : tab === key);
+  // Background hues render as pale tints in light mode (see Background.jsx) —
+  // preview the swatches the same way so they show what you'll actually get.
+  const isLight =
+    (filters.theme || "dark") === "light" ||
+    ((filters.theme || "dark") === "system" &&
+      window.matchMedia("(prefers-color-scheme: light)").matches);
+  const swatchCss = (p) =>
+    isLight ? `hsl(${p.h} ${Math.min(p.s, 45)}% 91%)` : `hsl(${p.h} ${p.s}% ${p.l}%)`;
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal wide" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Settings">
-        <header className="modal-head">
-          <div className="modal-title">⚙ Settings</div>
-          <button className="modal-x" onClick={onClose} aria-label="Close">✕</button>
-        </header>
-
-        <div className="modal-cols">
-          <nav className="modal-rail">
-            {TABS.map((t) => (
-              <button key={t.key} className={"rail-tab" + (tab === t.key ? " on" : "")} onClick={() => setTab(t.key)}>
-                <span className="rail-ic">{t.icon}</span>{t.label}
+    <div className="modal-backdrop sm-backdrop" onClick={onClose}>
+      <div className="sm-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Settings">
+        <aside className="sm-rail">
+          <div className="sm-rail-brand">
+            <span className="logo-mark">◆</span> Synapse
+            <span className="sm-rail-sub">Settings</span>
+          </div>
+          <div className="sm-search">
+            <span className="sm-search-ic">⌕</span>
+            <input
+              autoFocus
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search settings…"
+            />
+            {query && <button className="sm-search-x" onClick={() => setQuery("")}>✕</button>}
+          </div>
+          <nav className="sm-nav">
+            {NAV.filter((n) => !searching || sectionHits[n.key]).map((n) => (
+              <button
+                key={n.key}
+                className={"sm-nav-item" + (!searching && tab === n.key ? " on" : "")}
+                onClick={() => { setTab(n.key); setQuery(""); }}
+              >
+                <span className="sm-nav-ic">{n.icon}</span>
+                <span className="sm-nav-text">
+                  <span className="sm-nav-label">{n.label}</span>
+                  <span className="sm-nav-desc">{n.desc}</span>
+                </span>
               </button>
             ))}
+            {searching && !Object.values(sectionHits).some(Boolean) && (
+              <div className="sm-nav-none">No settings match “{query.trim()}”.</div>
+            )}
           </nav>
+          <div className="sm-rail-foot">
+            <span className="sm-saved">● All changes save instantly</span>
+          </div>
+        </aside>
 
-          <div className="modal-body">
-            {tab === "appearance" && (
+        <main className="sm-body">
+          <header className="sm-head">
+            <h3>{searching ? `Results for “${query.trim()}”` : NAV.find((n) => n.key === tab)?.label}</h3>
+            <button className="sm-x" onClick={onClose} aria-label="Close settings">✕</button>
+          </header>
+
+          <div className="sm-scroll">
+            {showSection("appearance") && (
               <>
-                <div className="sec-head">Background</div>
-                <Segmented
-                  label="Mode" hint="What sits behind the app"
-                  value={bgMode}
-                  options={[{ v: "none", l: "None" }, { v: "color", l: "Color" }, { v: "aurora", l: "Aurora" }]}
-                  onChange={(v) => setFlag("backgroundMode", v)}
-                />
-                {bgMode !== "none" && (
-                  <div className="bg-pickers">
-                    <div className="bg-presets">
-                      {BG_PRESETS.map((p) => {
-                        const c = filters.backgroundColor || {};
-                        const active = c.h === p.h && c.s === p.s && c.l === p.l;
-                        return (
-                          <button
-                            key={p.name}
-                            className={"bg-swatch" + (active ? " on" : "")}
-                            title={p.name}
-                            style={{ background: `hsl(${p.h} ${p.s}% ${p.l}%)` }}
-                            onClick={() => setFlag("backgroundColor", { h: p.h, s: p.s, l: p.l })}
+                <Group title="Theme" desc="Panels and text — the terminal stays dark either way." visible={hit("theme dark light system")}>
+                  <ThemeCards value={filters.theme || "dark"} onChange={(v) => setFlag("theme", v)} />
+                </Group>
+                <Group title="Accent" desc="Buttons, highlights, the active tab and the logo." visible={hit("accent color brand")}>
+                  <div className="sm-pad">
+                    <Swatches
+                      items={ACCENT_PRESETS.map((hex) => ({ key: hex, css: hex, title: hex }))}
+                      isOn={(it) => (filters.accent || ACCENT_PRESETS[0]) === it.key}
+                      onPick={(it) => setFlag("accent", it.key === ACCENT_PRESETS[0] ? null : it.key)}
+                      custom={
+                        <label className="sm-swatch custom" title="Custom accent">
+                          <input
+                            type="color"
+                            value={filters.accent || ACCENT_PRESETS[0]}
+                            onChange={(e) => setFlag("accent", e.target.value)}
                           />
-                        );
-                      })}
-                    </div>
-                    <label className="bg-custom">
-                      <span>Custom</span>
-                      <input
-                        type="color"
-                        value={hslToHex(filters.backgroundColor || { h: 222, s: 47, l: 11 })}
-                        onChange={(e) => setFlag("backgroundColor", hexToHsl(e.target.value))}
-                      />
-                    </label>
+                          <span>＋</span>
+                        </label>
+                      }
+                    />
                   </div>
-                )}
-                {bgMode === "aurora" && (
-                  <Segmented
-                    label="Aurora speed" hint="Drift speed of the blobs"
-                    value={filters.warpSpeed ?? 1}
-                    options={[{ v: 0, l: "Off" }, { v: 0.5, l: "Slow" }, { v: 1, l: "Normal" }, { v: 2, l: "Fast" }, { v: 4, l: "Warp" }]}
-                    onChange={(v) => setFlag("warpSpeed", v)}
-                  />
-                )}
+                </Group>
+                <Group title="Background" desc="What sits behind the app's panels." visible={hit("background aurora color speed")}>
+                  <Item label="Mode" hint="None keeps it flat; Aurora drifts slowly" control={
+                    <Seg
+                      value={bgMode}
+                      options={[{ v: "none", l: "None" }, { v: "color", l: "Color" }, { v: "aurora", l: "Aurora" }]}
+                      onChange={(v) => setFlag("backgroundMode", v)}
+                    />
+                  } />
+                  {bgMode !== "none" && (
+                    <Item
+                      label="Color"
+                      hint={isLight ? "Hues render as pale tints in light mode" : "Preset tones, or pick your own"}
+                      control={
+                      <Swatches
+                        items={BG_PRESETS.map((p) => ({ key: p.name, css: swatchCss(p), title: p.name, p }))}
+                        isOn={(it) => {
+                          const c = filters.backgroundColor || {};
+                          return c.h === it.p.h && c.s === it.p.s && c.l === it.p.l;
+                        }}
+                        onPick={(it) => setFlag("backgroundColor", { h: it.p.h, s: it.p.s, l: it.p.l })}
+                        custom={
+                          <label className="sm-swatch custom" title="Custom color">
+                            <input
+                              type="color"
+                              value={hslToHex(filters.backgroundColor || { h: 222, s: 47, l: 11 })}
+                              onChange={(e) => setFlag("backgroundColor", hexToHsl(e.target.value))}
+                            />
+                            <span>＋</span>
+                          </label>
+                        }
+                      />
+                    } />
+                  )}
+                  {bgMode === "aurora" && (
+                    <Item label="Aurora speed" hint="Drift speed of the blobs" control={
+                      <Seg
+                        value={filters.warpSpeed ?? 1}
+                        options={[{ v: 0, l: "Off" }, { v: 0.5, l: "Slow" }, { v: 1, l: "Normal" }, { v: 2, l: "Fast" }, { v: 4, l: "Warp" }]}
+                        onChange={(v) => setFlag("warpSpeed", v)}
+                      />
+                    } />
+                  )}
+                </Group>
               </>
             )}
 
-            {tab === "filters" && (
+            {showSection("conversation") && (
               <>
-                <div className="sec-head">Conversation</div>
-                {CONVO.map((r) => (
-                  <Row key={r.key} color={r.color} label={r.label} hint={r.hint} checked={!!filters[r.key]} onChange={(v) => setFlag(r.key, v)} />
-                ))}
+                <Group title="Conversation" desc="Which message types appear in the feed.">
+                  {CONVO.filter((r) => hit(r.label, r.hint)).map((r) => (
+                    <ToggleItem key={r.key} color={r.color} label={r.label} hint={r.hint} checked={!!filters[r.key]} onChange={(v) => setFlag(r.key, v)} />
+                  ))}
+                </Group>
+                <Group title="Plans & results" desc="Claude's working artifacts.">
+                  {RESULTS.filter((r) => hit(r.label, r.hint)).map((r) => (
+                    <ToggleItem key={r.key} color={r.color} label={r.label} hint={r.hint} checked={!!filters[r.key]} onChange={(v) => setFlag(r.key, v)} />
+                  ))}
+                </Group>
+              </>
+            )}
 
-                <div className="sec-head">Plans &amp; results</div>
-                {RESULTS.map((r) => (
-                  <Row key={r.key} color={r.color} label={r.label} hint={r.hint} checked={!!filters[r.key]} onChange={(v) => setFlag(r.key, v)} />
-                ))}
-
-                <div className="sec-head">Tool calls <span className="sec-badge">{onCount}/{TOOL_CATS.length}</span></div>
-                <Row color={KIND_COLOR.toolcall} label="Show tool calls" hint="Master toggle" checked={!!filters.tool_use} onChange={(v) => setFlag("tool_use", v)} />
-                <Segmented
-                  label="Filtered tool display" hint="How filtered-out tool calls render"
-                  value={filters.filteredToolDisplay}
-                  options={[{ v: "dot", l: "Dot" }, { v: "pill", l: "Pill" }, { v: "hidden", l: "Hidden" }]}
-                  onChange={(v) => setFlag("filteredToolDisplay", v)}
-                />
-                <button className={"cats-toggle" + (filters.tool_use ? "" : " dim")} onClick={() => setCatsOpen((v) => !v)} aria-expanded={catsOpen}>
-                  <span className="cats-caret">{catsOpen ? "▾" : "▸"}</span>
-                  {catsOpen ? "Hide categories" : "Show 14 categories"}
-                  <span className="cats-count">{onCount}/{TOOL_CATS.length}</span>
-                </button>
-                {catsOpen && (
-                  <div className={"cats" + (filters.tool_use ? "" : " dim")}>
-                    <div className="cats-bulk">
-                      <button className="bulk-btn" onClick={() => setAllCats(true)}>Show all</button>
-                      <button className="bulk-btn" onClick={() => setAllCats(false)}>Hide all</button>
-                    </div>
-                    {TOOL_CATS.map((c) => (
-                      <Row key={c.key} color={c.color} label={c.label} hint={c.key} checked={!!filters.toolCategories[c.key]} onChange={(v) => setCat(c.key, v)} />
+            {showSection("tools") && (
+              <>
+                <Group title="Tool calls" desc="How tool activity renders in the feed." visible={hit("tool calls master filtered display dot pill hidden")}>
+                  <ToggleItem color={KIND_COLOR.toolcall} label="Show tool calls" hint="Master toggle for all categories" checked={!!filters.tool_use} onChange={(v) => setFlag("tool_use", v)} />
+                  <Item label="Filtered tool display" hint="How filtered-out tool calls render" control={
+                    <Seg
+                      value={filters.filteredToolDisplay}
+                      options={[{ v: "dot", l: "Dot" }, { v: "pill", l: "Pill" }, { v: "hidden", l: "Hidden" }]}
+                      onChange={(v) => setFlag("filteredToolDisplay", v)}
+                    />
+                  } />
+                </Group>
+                <Group
+                  title={`Categories`}
+                  desc={`${onCount} of ${TOOL_CATS.length} categories visible.`}
+                  actions={
+                    <>
+                      <button className="sm-btn small" onClick={() => setAllCats(true)}>Show all</button>
+                      <button className="sm-btn small" onClick={() => setAllCats(false)}>Hide all</button>
+                    </>
+                  }
+                >
+                  <div className={"sm-grid" + (filters.tool_use ? "" : " dim")}>
+                    {TOOL_CATS.filter((c) => hit(c.label, c.key)).map((c) => (
+                      <ToggleItem key={c.key} color={c.color} label={c.label} hint={c.key} checked={!!filters.toolCategories[c.key]} onChange={(v) => setCat(c.key, v)} />
                     ))}
                   </div>
-                )}
+                </Group>
               </>
             )}
 
-            {tab === "launch" && (
+            {showSection("workspace") && (
               <>
-                <div className="sec-head">New-session screen</div>
-                <Segmented
-                  label="Recent folders to show" hint="On the launch screen"
-                  value={filters.recentFoldersLimit ?? 5}
-                  options={[{ v: 0, l: "Off" }, { v: 3, l: "3" }, { v: 5, l: "5" }, { v: 10, l: "10" }, { v: 15, l: "15" }]}
-                  onChange={(v) => setFlag("recentFoldersLimit", v)}
-                />
-                <div className="sec-head">Tabs</div>
-                <Segmented
-                  label="Tab position" hint="Where session tabs appear"
-                  value={filters.tabPosition || "top"}
-                  options={[{ v: "top", l: "Top" }, { v: "left", l: "Left" }]}
-                  onChange={(v) => setFlag("tabPosition", v)}
-                />
+                <Group title="Launch" desc="The new-session screen." visible={hit("recent folders launch")}>
+                  <Item label="Recent folders" hint="How many to list on the launch screen" control={
+                    <Seg
+                      value={filters.recentFoldersLimit ?? 5}
+                      options={[{ v: 0, l: "Off" }, { v: 3, l: "3" }, { v: 5, l: "5" }, { v: 10, l: "10" }, { v: 15, l: "15" }]}
+                      onChange={(v) => setFlag("recentFoldersLimit", v)}
+                    />
+                  } />
+                </Group>
+                <Group title="Tabs" desc="Session tab placement." visible={hit("tabs position top left")}>
+                  <Item label="Tab position" hint="Top bar, or a left rail" control={
+                    <Seg
+                      value={filters.tabPosition || "top"}
+                      options={[{ v: "top", l: "Top" }, { v: "left", l: "Left" }]}
+                      onChange={(v) => setFlag("tabPosition", v)}
+                    />
+                  } />
+                </Group>
+                <Group title="Terminal" desc="The embedded console." visible={hit("composer terminal dictation prompt input")}>
+                  <ToggleItem
+                    color="#27B8FD"
+                    label="Prompt composer"
+                    hint="An input box under the terminal (dictation-friendly); off = type straight into the console"
+                    checked={!!filters.showComposer}
+                    onChange={(v) => setFlag("showComposer", v)}
+                  />
+                </Group>
               </>
             )}
-          </div>
-        </div>
 
-        <footer className="modal-foot">
-          <span className="foot-note">Saved locally · changes apply instantly</span>
-          <div className="foot-btns">
-            <button className="btn-ghost" onClick={reset}>↺ Reset</button>
-            <button className="btn-primary" onClick={onClose}>Done</button>
+            {showSection("about") && (
+              <Group title="About" desc="App version and updates.">
+                <About />
+              </Group>
+            )}
           </div>
-        </footer>
+
+          <footer className="sm-foot">
+            <button className="sm-btn ghost" onClick={reset} title="Restore every setting to its default">↺ Reset to defaults</button>
+            <button className="sm-btn primary" onClick={onClose}>Done</button>
+          </footer>
+        </main>
       </div>
     </div>
   );

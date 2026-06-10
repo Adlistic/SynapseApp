@@ -60,7 +60,10 @@ async fn finalize_claim(client: &reqwest::Client, token: &str) -> Result<(), Str
         return Ok(());
     }
     let status = resp.status().as_u16();
-    let body: Value = resp.json().await.unwrap_or_else(|_| json!({}));
+    let body: Value = resp.json().await.unwrap_or_else(|e| {
+        tracing::warn!(target: "synapse2", error = %e, "auth response was not JSON");
+        json!({})
+    });
     Err(format!(
         "claim {} {}",
         status,
@@ -155,7 +158,10 @@ pub async fn get_entitlement() -> Result<Value, String> {
         .map_err(|e| e.to_string())?;
 
     let status = resp.status().as_u16();
-    let body: Value = resp.json().await.unwrap_or_else(|_| json!({}));
+    let body: Value = resp.json().await.unwrap_or_else(|e| {
+        tracing::warn!(target: "synapse2", error = %e, "auth response was not JSON");
+        json!({})
+    });
 
     // The server signals account-deleted / token-revoked via 404 / 410 — surface
     // it so the frontend can drop back to the sign-in screen.

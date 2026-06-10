@@ -71,6 +71,10 @@ export default function AuthGate({ children }) {
         setOffline(true);
         setPhase("ok");
       } else {
+        // Distinguish "no account" from "couldn't reach the server" so a
+        // previously signed-in user on a dead connection isn't told to sign in
+        // with no explanation.
+        setOffline(true);
         setPhase("signin");
       }
     }
@@ -149,7 +153,7 @@ export default function AuthGate({ children }) {
   return (
     <div className="gate">
       <div className="gate-card">
-        <div className="gate-logo">◆ Synapse</div>
+        <div className="gate-logo"><span className="logo-mark">◆</span> Synapse</div>
         <div className="gate-sub">Claude Code Workspace · HyperVoice Suite</div>
 
         {phase === "checking" && <div className="gate-msg">Checking your account…</div>}
@@ -159,9 +163,20 @@ export default function AuthGate({ children }) {
             <div className="gate-msg">
               Synapse is part of the HyperVoice Suite. Sign in with your HyperVoice account to continue.
             </div>
+            {offline && (
+              <div className="gate-offline-note">
+                ⚠ hypervoice.app couldn't be reached — if you've signed in before, this is
+                likely just a connection problem.
+              </div>
+            )}
             <button className="gate-btn" onClick={signIn} disabled={busy}>
               {waiting ? "Waiting for the browser…" : "Sign in with HyperVoice"}
             </button>
+            {offline && (
+              <button className="gate-link" onClick={evaluate}>
+                ↻ Retry connection
+              </button>
+            )}
             {waiting && (
               <button className="gate-link" onClick={evaluate}>
                 I've finished signing in — re-check

@@ -7,22 +7,139 @@
 //! scraping the terminal.
 
 mod hv_auth;
+mod sessions;
 mod terminals;
 
 use parking_lot::Mutex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 use tracing::info;
 
 use synapse_core::transcript::parse_line;
+use synapse_core::types::Message;
 use synapse_core::util::new_id;
 use synapse_core::worktree::WorktreeManager;
 
+/// Accumulated token usage for one session (summed from the transcript's
+/// per-message `usage` blocks).
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Usage {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_creation: u64,
+}
+
+/// Incremental tail state for one session's transcript. The tailer thread
+/// reads ONLY appended bytes, parses only complete lines, and appends into
+/// `messages` — so the UI never pays for a full re-read/re-parse again.
+#[derive(Default)]
+struct SessionTail {
+    path: Option<PathBuf>,
+    /// Bytes consumed so far (always ends on a line boundary).
+    offset: u64,
+    /// Carry-over of a trailing partial line awaiting its newline.
+    partial: String,
+    messages: Vec<Message>,
+    usage: Usage,
+    line_no: i64,
+    /// Flipped false by `close_session`; the tailer thread exits on it.
+    alive: bool,
+}
+
+type Tails = Arc<Mutex<HashMap<String, SessionTail>>>;
+
 struct AppState {
-    /// session id → resolved transcript path (cached once located on disk).
-    transcript_paths: Mutex<HashMap<String, PathBuf>>,
+    tails: Tails,
+}
+
+/// Consume any newly appended complete lines from the transcript. Returns true
+/// if anything new was parsed.
+fn drain_tail(tail: &mut SessionTail) -> bool {
+    let Some(path) = tail.path.clone() else { return false };
+    let len = match std::fs::metadata(&path) {
+        Ok(m) => m.len(),
+        Err(_) => return false,
+    };
+    if len <= tail.offset {
+        return false;
+    }
+    let Ok(mut f) = std::fs::File::open(&path) else { return false };
+    if f.seek(SeekFrom::Start(tail.offset)).is_err() {
+        return false;
+    }
+    let mut buf = Vec::with_capacity((len - tail.offset) as usize);
+    if f.read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    tail.offset += buf.len() as u64;
+    let chunk = String::from_utf8_lossy(&buf);
+    let text = format!("{}{}", tail.partial, chunk);
+    // Only parse complete lines; keep any trailing partial for the next pass.
+    let (complete, partial) = match text.rfind('\n') {
+        Some(i) => (text[..i].to_string(), text[i + 1..].to_string()),
+        None => (String::new(), text),
+    };
+    tail.partial = partial;
+    let mut added = false;
+    for line in complete.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        tail.line_no += 1;
+        for m in parse_line(line, tail.line_no, None) {
+            tail.messages.push(m);
+            added = true;
+        }
+        // Token usage rides on the raw entry, which parse_line doesn't surface.
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
+                let g = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+                tail.usage.input += g("input_tokens");
+                tail.usage.output += g("output_tokens");
+                tail.usage.cache_read += g("cache_read_input_tokens");
+                tail.usage.cache_creation += g("cache_creation_input_tokens");
+            }
+        }
+    }
+    added
+}
+
+/// Start the background tailer for a session: locates the transcript (it may
+/// not exist yet), then stat-polls it cheaply and pushes new messages into the
+/// shared cache, emitting `syn2:changed` so the frontend pulls the delta.
+fn spawn_tailer(app: tauri::AppHandle, tails: Tails, session_id: String) {
+    {
+        let mut map = tails.lock();
+        if map.contains_key(&session_id) {
+            return; // already tailing
+        }
+        map.insert(session_id.clone(), SessionTail { alive: true, ..Default::default() });
+    }
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let mut map = tails.lock();
+            let Some(tail) = map.get_mut(&session_id) else { return };
+            if !tail.alive {
+                map.remove(&session_id);
+                return;
+            }
+            if tail.path.is_none() {
+                tail.path = find_transcript(&session_id);
+            }
+            let added = drain_tail(tail);
+            drop(map);
+            if added {
+                let _ = app.emit("syn2:changed", serde_json::json!({ "sessionId": session_id }));
+            }
+        }
+    });
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,7 +153,7 @@ struct SessionOpts {
 }
 
 /// Where Claude Code keeps per-session transcripts.
-fn claude_projects_dir() -> Option<PathBuf> {
+pub(crate) fn claude_projects_dir() -> Option<PathBuf> {
     let home = std::env::var("USERPROFILE").ok().or_else(|| std::env::var("HOME").ok())?;
     Some(PathBuf::from(home).join(".claude").join("projects"))
 }
@@ -60,14 +177,19 @@ fn find_transcript(session_id: &str) -> Option<PathBuf> {
 
 /// Begin a session: resolve the folder (optionally a fresh git worktree), mint a
 /// session id, and hand the frontend the `claude` command + cwd to run in the
-/// embedded terminal.
+/// embedded terminal. Also starts the transcript tailer.
 #[tauri::command]
-fn start_session(opts: SessionOpts) -> Result<serde_json::Value, String> {
+fn start_session(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    opts: SessionOpts,
+) -> Result<serde_json::Value, String> {
     let folder = opts.folder.trim();
     if folder.is_empty() {
         return Err("Choose a folder first.".into());
     }
-    let mut cwd = PathBuf::from(folder);
+    let root = PathBuf::from(folder);
+    let mut cwd = root.clone();
     if !cwd.is_dir() {
         return Err(format!("Not a folder: {folder}"));
     }
@@ -80,7 +202,9 @@ fn start_session(opts: SessionOpts) -> Result<serde_json::Value, String> {
             let short = &id[..8.min(id.len())];
             let b = format!("synapse2/{short}");
             let wt = cwd.join(".synapse2").join("worktrees").join(short);
-            std::fs::create_dir_all(wt.parent().unwrap()).ok();
+            if let Some(parent) = wt.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
             match wm.add(&b, &wt, None) {
                 Ok(p) => {
                     info!(target: "synapse2", branch = %b, path = %p.display(), "created worktree");
@@ -100,46 +224,218 @@ fn start_session(opts: SessionOpts) -> Result<serde_json::Value, String> {
         command.push_str(" --dangerously-skip-permissions");
     }
     info!(target: "synapse2", session = %session_id, cwd = %cwd.display(), full_autonomy = opts.full_autonomy, worktree = ?branch, "session start");
+    spawn_tailer(app, state.tails.clone(), session_id.clone());
 
     Ok(serde_json::json!({
         "sessionId": session_id,
+        "root": root.to_string_lossy(),
         "cwd": cwd.to_string_lossy(),
         "command": command,
         "branch": branch,
     }))
 }
 
-/// Return the parsed transcript for a session (flat, typed messages). The
-/// frontend groups them into turns. `ready` is false until the file appears.
+/// Resume an existing Claude Code session (from the session browser) in a new
+/// embedded terminal. The tailer preloads the FULL existing transcript, so the
+/// turn panel shows the whole history immediately.
 #[tauri::command]
-fn get_conversation(state: State<AppState>, session_id: String) -> serde_json::Value {
-    let path = {
-        let mut paths = state.transcript_paths.lock();
-        if let Some(p) = paths.get(&session_id) {
-            Some(p.clone())
-        } else if let Some(p) = find_transcript(&session_id) {
-            paths.insert(session_id.clone(), p.clone());
-            Some(p)
-        } else {
-            None
+fn resume_session(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    session_id: String,
+    cwd: String,
+    full_autonomy: bool,
+) -> Result<serde_json::Value, String> {
+    let cwd = cwd.trim();
+    let dir = PathBuf::from(cwd);
+    if cwd.is_empty() || !dir.is_dir() {
+        return Err(format!("The session's folder no longer exists: {cwd}"));
+    }
+    let mut command = format!("claude --resume {session_id}");
+    if full_autonomy {
+        command.push_str(" --dangerously-skip-permissions");
+    }
+    info!(target: "synapse2", session = %session_id, cwd = %cwd, "session resume");
+    spawn_tailer(app, state.tails.clone(), session_id.clone());
+    Ok(serde_json::json!({
+        "sessionId": session_id,
+        "root": cwd,
+        "cwd": cwd,
+        "command": command,
+        "branch": serde_json::Value::Null,
+    }))
+}
+
+/// Delta read of a session's parsed transcript: returns messages[since..] from
+/// the tailer's cache — no file I/O, no re-parsing. `ready` flips true once the
+/// transcript file has been located.
+#[tauri::command]
+fn get_conversation(state: State<AppState>, session_id: String, since: Option<usize>) -> serde_json::Value {
+    let map = state.tails.lock();
+    let Some(tail) = map.get(&session_id) else {
+        return serde_json::json!({ "ready": false, "messages": [], "total": 0 });
+    };
+    let since = since.unwrap_or(0).min(tail.messages.len());
+    serde_json::json!({
+        "ready": tail.path.is_some(),
+        "messages": &tail.messages[since..],
+        "total": tail.messages.len(),
+        "usage": tail.usage,
+    })
+}
+
+/// End a session: stop its tailer and (optionally) deal with its worktree.
+/// `action`: "keep" leaves everything; "delete" removes the worktree + branch;
+/// "merge" commits any leftover work in the worktree, merges the branch into
+/// the root tree, then removes the worktree + branch.
+#[tauri::command]
+fn close_session(
+    state: State<AppState>,
+    session_id: String,
+    root: Option<String>,
+    worktree_path: Option<String>,
+    branch: Option<String>,
+    action: Option<String>,
+) -> Result<(), String> {
+    // Stop the tailer only once any worktree action has succeeded, so a failed
+    // merge leaves the session fully usable.
+    let stop_tailer = |state: &State<AppState>| {
+        if let Some(t) = state.tails.lock().get_mut(&session_id) {
+            t.alive = false;
         }
     };
-    let Some(path) = path else {
-        return serde_json::json!({ "ready": false, "messages": [] });
+    let action = action.unwrap_or_else(|| "keep".into());
+    let (Some(root), Some(wt), Some(branch)) = (root, worktree_path, branch) else {
+        stop_tailer(&state);
+        return Ok(());
     };
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return serde_json::json!({ "ready": false, "messages": [] }),
-    };
-    let mut msgs = Vec::new();
-    let mut ts = 0i64;
-    for line in content.lines() {
-        ts += 1;
-        for m in parse_line(line, ts, None) {
-            msgs.push(m);
+    if action == "keep" {
+        stop_tailer(&state);
+        return Ok(());
+    }
+    let root = PathBuf::from(root);
+    let wt = PathBuf::from(wt);
+    if action == "merge" {
+        // Commit whatever the session left uncommitted so the merge sees it.
+        let dirty = git(&wt, &["status", "--porcelain"])?;
+        if !dirty.trim().is_empty() {
+            git(&wt, &["add", "-A"])?;
+            git(&wt, &[
+                "-c", "user.email=synapse@local",
+                "-c", "user.name=Synapse",
+                "commit", "-q", "-m", &format!("{branch}: session work (committed by Synapse)"),
+            ])?;
+        }
+        // Merge only if the branch actually has commits beyond the root HEAD.
+        let ahead = git(&root, &["rev-list", "--count", &format!("HEAD..{branch}")])?;
+        if ahead.trim() != "0" {
+            git(&root, &["merge", "--no-edit", &branch])?;
+            info!(target: "synapse2", branch = %branch, "merged session branch");
         }
     }
-    serde_json::json!({ "ready": true, "messages": msgs })
+    // For both "merge" and "delete": clean up the worktree + branch.
+    let wt_str = wt.to_string_lossy().to_string();
+    git(&root, &["worktree", "remove", "--force", &wt_str])?;
+    let _ = git(&root, &["branch", "-D", &branch]); // may fail if never created
+    info!(target: "synapse2", branch = %branch, action = %action, "worktree cleaned up");
+    stop_tailer(&state);
+    Ok(())
+}
+
+/// Worktrees under `<folder>/.synapse2/worktrees` left behind by old sessions.
+#[tauri::command]
+fn list_orphan_worktrees(folder: String) -> Vec<serde_json::Value> {
+    let dir = PathBuf::from(folder.trim()).join(".synapse2").join("worktrees");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .map(|e| {
+            serde_json::json!({
+                "path": e.path().to_string_lossy(),
+                "name": e.file_name().to_string_lossy(),
+            })
+        })
+        .collect()
+}
+
+/// Remove ALL leftover session worktrees under `<folder>/.synapse2/worktrees`
+/// (and their `synapse2/<name>` branches). Returns how many were removed.
+#[tauri::command]
+fn cleanup_orphan_worktrees(folder: String) -> Result<usize, String> {
+    let root = PathBuf::from(folder.trim());
+    let dir = root.join(".synapse2").join("worktrees");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Ok(0) };
+    let mut removed = 0usize;
+    for e in entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+        let name = e.file_name().to_string_lossy().to_string();
+        let p = e.path().to_string_lossy().to_string();
+        if git(&root, &["worktree", "remove", "--force", &p]).is_ok() {
+            removed += 1;
+        } else {
+            // Not a registered worktree any more — just delete the directory.
+            if std::fs::remove_dir_all(e.path()).is_ok() {
+                removed += 1;
+            }
+        }
+        let _ = git(&root, &["branch", "-D", &format!("synapse2/{name}")]);
+    }
+    info!(target: "synapse2", removed, "orphan worktrees cleaned");
+    Ok(removed)
+}
+
+/// Run a git command rooted at `cwd`, returning trimmed stdout.
+fn git(cwd: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let mut c = std::process::Command::new("git");
+    c.arg("-C").arg(cwd).args(args);
+    synapse_core::runner::hide_window(&mut c);
+    let out = c.output().map_err(|e| format!("spawn git: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Write an exported conversation to disk (path comes from the save dialog).
+#[tauri::command]
+fn save_text_file(path: String, content: String) -> Result<(), String> {
+    std::fs::write(PathBuf::from(path.trim()), content).map_err(|e| e.to_string())
+}
+
+/// Last-known Claude rate-limit windows (5-hour session + weekly), cached to
+/// `~/.synapse/ratelimits.json` by the user's statusline script on every
+/// Claude Code statusline refresh. Free to read; no tokens involved.
+#[tauri::command]
+fn get_rate_limits() -> serde_json::Value {
+    let home = std::env::var("USERPROFILE")
+        .ok()
+        .or_else(|| std::env::var("HOME").ok())
+        .unwrap_or_else(|| ".".to_string());
+    let p = PathBuf::from(home).join(".synapse").join("ratelimits.json");
+    std::fs::read(p)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// Delete one session transcript from Claude Code's store (the browser's 🗑).
+/// Restricted to paths inside `~/.claude/projects`.
+#[tauri::command]
+fn delete_claude_session(path: String) -> Result<(), String> {
+    let p = PathBuf::from(path.trim());
+    let root = claude_projects_dir().ok_or("no Claude session store")?;
+    let canon = p.canonicalize().map_err(|e| format!("session not found: {e}"))?;
+    let canon_root = root.canonicalize().map_err(|e| e.to_string())?;
+    if !canon.starts_with(&canon_root) {
+        return Err("path is outside the Claude session store".into());
+    }
+    std::fs::remove_file(&canon).map_err(|e| e.to_string())?;
+    info!(target: "synapse2", path = %canon.display(), "transcript deleted");
+    Ok(())
 }
 
 /// Read the OS clipboard (for terminal paste — bypasses the WebView2 clipboard,
@@ -185,7 +481,7 @@ pub fn run() {
     info!(target: "synapse2", "Synapse 2 starting");
 
     let state = AppState {
-        transcript_paths: Mutex::new(HashMap::new()),
+        tails: Arc::new(Mutex::new(HashMap::new())),
     };
 
     tauri::Builder::default()
@@ -242,7 +538,16 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             start_session,
+            resume_session,
             get_conversation,
+            close_session,
+            list_orphan_worktrees,
+            cleanup_orphan_worktrees,
+            save_text_file,
+            get_rate_limits,
+            delete_claude_session,
+            sessions::list_claude_sessions,
+            sessions::search_sessions,
             clip_get,
             clip_set,
             open_external,

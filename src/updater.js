@@ -18,3 +18,19 @@ export async function checkForUpdates() {
     // No updater artifacts in dev, or offline — ignore.
   }
 }
+
+// Manual check (Settings → "Check for updates"): reports what happened instead
+// of failing silently. Installs + relaunches when an update is found.
+export async function checkForUpdatesManual() {
+  try {
+    const update = await check();
+    if (update && update.available) {
+      await update.downloadAndInstall();
+      await relaunch();
+      return { status: "installing", version: update.version };
+    }
+    return { status: "uptodate" };
+  } catch (e) {
+    return { status: "error", message: String(e) };
+  }
+}

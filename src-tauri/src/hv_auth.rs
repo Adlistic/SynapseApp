@@ -140,8 +140,16 @@ pub fn handle_claim_url(url: &str) -> Option<String> {
             if let Some(tok) = kv.next() {
                 let tok = urldecode(tok);
                 if !tok.is_empty() {
-                    let _ = store_token(&tok);
-                    return Some(tok);
+                    // Only report success if the token actually persisted —
+                    // otherwise the entitlement check would find nothing and
+                    // the user would be silently stuck at sign-in.
+                    match store_token(&tok) {
+                        Ok(()) => return Some(tok),
+                        Err(e) => {
+                            tracing::error!(target: "synapse2", error = %e, "failed to store account token");
+                            return None;
+                        }
+                    }
                 }
             }
         }

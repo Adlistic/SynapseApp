@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-06-10
+
+### Fixed
+- **Sign-in did nothing / account never linked.** `keyring` was declared with no
+  backend feature, so on Windows it silently no-op'd — the deep-link token was
+  never persisted and the gate stayed shut. Enabled `keyring`'s `windows-native`
+  backend and stopped swallowing the store error.
+- The auto-updater now runs on launch regardless of auth state, so a build that
+  can't pass the gate can still self-heal via update.
+
 ## [0.1.0] — 2026-06-10
 
 Initial release. Synapse is the Claude Code workspace for the HyperVoice Suite,

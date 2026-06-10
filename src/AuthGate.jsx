@@ -101,13 +101,14 @@ export default function AuthGate({ children }) {
     return () => window.removeEventListener("focus", onFocus);
   }, [phase, evaluate]);
 
-  // Kick the updater once we're entitled.
+  // Kick the updater once on mount, regardless of auth state — so a build that
+  // can't get past the gate (e.g. a sign-in bug) can still self-heal via update.
   useEffect(() => {
-    if (phase === "ok" && !checkedUpdates.current) {
+    if (!checkedUpdates.current) {
       checkedUpdates.current = true;
       checkForUpdates();
     }
-  }, [phase]);
+  }, []);
 
   const signIn = async () => {
     setBusy(true);

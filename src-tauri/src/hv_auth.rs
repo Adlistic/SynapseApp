@@ -142,26 +142,33 @@ pub async fn get_entitlement() -> Result<Value, String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    // Finalize the claim (sets claimed_at) before checking entitlement —
-    // otherwise the endpoint 409s and the app looks like it has no access.
-    // Idempotent for this device, so it's safe to run on every check.
-    if let Err(e) = finalize_claim(&client, &token).await {
-        tracing::warn!(target: "synapse2", error = %e, "claim finalize failed");
-    }
-
     let url = format!("{HV_BASE}/api/desktop/entitlements");
-    let resp = client
-        .get(&url)
-        .header("X-User-Token", &token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let fetch_ent = |client: &reqwest::Client, token: &str| {
+        client.get(&url).header("X-User-Token", token).send()
+    };
 
-    let status = resp.status().as_u16();
-    let body: Value = resp.json().await.unwrap_or_else(|e| {
+    let resp = fetch_ent(&client, &token).await.map_err(|e| e.to_string())?;
+    let mut status = resp.status().as_u16();
+    let mut body: Value = resp.json().await.unwrap_or_else(|e| {
         tracing::warn!(target: "synapse2", error = %e, "auth response was not JSON");
         json!({})
     });
+
+    // 409 = the claim was never finalized (claimed_at null). Finalize once,
+    // then retry — and ONLY then, so a healthy account never pays the extra
+    // round-trip or logs expired-token noise on every launch.
+    if status == 409 {
+        if let Err(e) = finalize_claim(&client, &token).await {
+            tracing::warn!(target: "synapse2", error = %e, "claim finalize failed");
+        }
+        if let Ok(resp2) = fetch_ent(&client, &token).await {
+            status = resp2.status().as_u16();
+            body = resp2.json().await.unwrap_or_else(|e| {
+                tracing::warn!(target: "synapse2", error = %e, "auth response was not JSON");
+                json!({})
+            });
+        }
+    }
 
     // The server signals account-deleted / token-revoked via 404 / 410 — surface
     // it so the frontend can drop back to the sign-in screen.

@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-06-12
+
+### Added
+- **Search highlighting** — in-session search now paints every match in the
+  rendered feed (markdown, plain text, tool output alike) via the CSS Custom
+  Highlight API, in brand gold.
+- **Needs-attention awareness** — an amber dot on any tab whose session looks
+  stalled on a tool approval (last activity was a tool call that never
+  returned), plus a "⚠ waiting?" hint in the topbar for the active tab.
+- **Finish notifications** — a Windows toast when Claude finishes working in a
+  background tab (or while the app is unfocused): "Claude finished — N new
+  steps." Toggle under Settings → Workspace → Notifications.
+- **Usage-limit chips for everyone** — Settings → Workspace → Usage limits can
+  now install a silent Claude Code status-line hook that feeds the
+  session/weekly chips (one click; never clobbers an existing custom status
+  line — those get a copyable snippet instead).
+- **"What's new" after updates** — the relevant changelog section appears once
+  after each auto-update.
+- **First-run welcome** — a three-step intro (sessions & tabs, terminal +
+  conversation, hotkeys) for new installs.
+
+### Changed
+- Session-browser project folders are collapsed by default.
+
+### Fixed
+- Startup no longer re-finalizes the account claim on every launch (which
+  logged a misleading "token expired" warning) — it now only runs when the
+  server actually reports an unclaimed token, then retries.
+
 ## [0.2.0] — 2026-06-11
 
 ### Added

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { TOOL_CATS, BG_PRESETS, ACCENT_PRESETS, KIND_COLOR } from "./filters.js";
 import { checkForUpdatesManual } from "./updater.js";
@@ -202,7 +203,50 @@ const NAV = [
 // Old keys still arrive from callers.
 const LEGACY = { filters: "conversation", launch: "workspace" };
 
-// ─── about / updates ────────────────────────────────────────────────────────
+// ─── statusline hook / about / updates ──────────────────────────────────────
+
+// Usage-limit chips need a Claude Code status-line hook that caches the
+// rate-limit data. This row installs/inspects it (never clobbers a custom one).
+function StatuslineRow() {
+  const [st, setSt] = useState(null);
+  const [err, setErr] = useState("");
+  useEffect(() => { invoke("statusline_status").then(setSt).catch(() => {}); }, []);
+
+  async function install() {
+    setErr("");
+    try { setSt(await invoke("install_statusline_hook")); }
+    catch (e) { setErr(String(e)); }
+  }
+  function copySnippet() {
+    if (st?.snippet) invoke("clip_set", { text: st.snippet }).catch(() => {});
+  }
+
+  const active = st && (st.configured === "ours" || (st.configured === "other" && st.cacheFresh));
+  return (
+    <>
+      <Item
+        label="Usage limit chips"
+        hint={
+          !st ? "Checking…"
+          : active && st.configured === "ours" ? "Active — Synapse's hook caches the data after each Claude response"
+          : active ? "Active — your own status line already feeds the cache"
+          : st.configured === "other" ? "You have a custom status line; add Synapse's snippet to it"
+          : "Install a silent Claude Code hook so the session/weekly chips have data"
+        }
+        control={
+          active ? (
+            <span className="sm-saved">✓ Active</span>
+          ) : st?.configured === "other" ? (
+            <button className="sm-btn" onClick={copySnippet} title="Copy the cache snippet, then paste it into your statusline script">Copy snippet</button>
+          ) : (
+            <button className="sm-btn" onClick={install}>Install hook</button>
+          )
+        }
+      />
+      {err && <div className="sm-item"><span className="sm-item-hint" style={{ color: "#ff6b6b" }}>{err}</span></div>}
+    </>
+  );
+}
 
 function About() {
   const [version, setVersion] = useState("");
@@ -274,7 +318,7 @@ export default function SettingsModal({ open, onClose, filters, setFlag, setCat,
     appearance: hit("theme dark light system accent color background aurora speed"),
     conversation: hit(CONVO.concat(RESULTS).map((r) => r.label + " " + r.hint).join(" ")),
     tools: hit("tool calls categories filtered display dot pill hidden " + TOOL_CATS.map((c) => c.label).join(" ")),
-    workspace: hit("recent folders launch tabs position composer terminal dictation prompt"),
+    workspace: hit("recent folders launch tabs position composer terminal dictation prompt notifications toast usage limits statusline"),
     about: hit("version updates check data local"),
   }), [q]);
 
@@ -476,6 +520,18 @@ export default function SettingsModal({ open, onClose, filters, setFlag, setCat,
                       onChange={(v) => setFlag("tabPosition", v)}
                     />
                   } />
+                </Group>
+                <Group title="Usage limits" desc="The session/weekly chips in the topbar." visible={hit("usage limits statusline chips rate session weekly hook")}>
+                  <StatuslineRow />
+                </Group>
+                <Group title="Notifications" desc="Stay aware of background sessions." visible={hit("notifications toast finish background")}>
+                  <ToggleItem
+                    color="#FFC700"
+                    label="Notify when Claude finishes"
+                    hint="Windows toast when a session completes work while you're in another tab or app"
+                    checked={!!filters.notifyOnFinish}
+                    onChange={(v) => setFlag("notifyOnFinish", v)}
+                  />
                 </Group>
                 <Group title="Terminal" desc="The embedded console." visible={hit("composer terminal dictation prompt input")}>
                   <ToggleItem

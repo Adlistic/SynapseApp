@@ -8,6 +8,7 @@
 
 mod hv_auth;
 mod sessions;
+mod statusline;
 mod terminals;
 
 use parking_lot::Mutex;
@@ -501,6 +502,7 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
@@ -546,6 +548,8 @@ pub fn run() {
             save_text_file,
             get_rate_limits,
             delete_claude_session,
+            statusline::statusline_status,
+            statusline::install_statusline_hook,
             sessions::list_claude_sessions,
             sessions::search_sessions,
             clip_get,

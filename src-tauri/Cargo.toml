@@ -1,6 +1,6 @@
 [package]
 name = "synapse2-desktop"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Synapse — Claude Code Workspace"
 authors = ["Chris Cousens"]
@@ -33,6 +33,7 @@ uuid = { version = "1", features = ["v4"] }
 # synapse-core is vendored into this repo (../synapse-core) so the app is
 # self-contained — no build-time dependency on the private Adlistic/Synapse repo.
 synapse-core = { path = "../synapse-core" }
+tauri-plugin-notification = "2"
 
 [profile.release]
 opt-level = "s"

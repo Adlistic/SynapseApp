@@ -68,6 +68,7 @@ export const DEFAULT_FILTERS = {
   showComposer: false, // input box under the terminal (off = type in the console)
   theme: "dark", // "dark" | "light" | "system"
   accent: null, // custom accent hex (null = palette default)
+  notifyOnFinish: true, // Windows toast when a background session finishes work
 };
 
 // Accent presets (applied to --accent). First = the HyperVoice brand default

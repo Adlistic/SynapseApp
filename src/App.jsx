@@ -2,6 +2,9 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
+import { getVersion } from "@tauri-apps/api/app";
+import changelogRaw from "../CHANGELOG.md?raw";
 import TerminalPane from "./TerminalPane.jsx";
 import SettingsModal from "./SettingsModal.jsx";
 import SessionBrowser from "./SessionBrowser.jsx";
@@ -26,6 +29,18 @@ import {
 // Components read the applied theme off the root element; any theme change
 // re-renders the whole tree (filters state), so this stays in sync.
 const isLightTheme = () => document.documentElement.dataset.theme === "light";
+
+// Windows toast, permission-checked once. Best-effort: failures are silent.
+let notifyGranted = null;
+async function toast(title, body) {
+  try {
+    if (notifyGranted === null) {
+      notifyGranted = await isPermissionGranted();
+      if (!notifyGranted) notifyGranted = (await requestPermission()) === "granted";
+    }
+    if (notifyGranted) sendNotification({ title, body });
+  } catch { /* notifications are never load-bearing */ }
+}
 
 const KIND_COLORS = KIND_COLOR;
 const CAT_COLOR = Object.fromEntries(TOOL_CATS.map((c) => [c.key, c.color]));
@@ -160,6 +175,85 @@ const PillFull = memo(function PillFull({ g }) {
     </span>
   );
 });
+
+// ─── what's-new (post-update) + first-run welcome ───────────────────────────
+
+const SEEN_VERSION_KEY = "synapse2.lastVersion";
+const TOURED_KEY = "synapse2.toured.v1";
+
+// Extract one version's section from CHANGELOG.md.
+function changelogSection(version) {
+  const start = changelogRaw.indexOf(`## [${version}]`);
+  if (start === -1) return "";
+  const rest = changelogRaw.slice(start);
+  const next = rest.indexOf("\n## [", 1);
+  return next === -1 ? rest : rest.slice(0, next);
+}
+
+function WhatsNew({ version, onClose }) {
+  const section = changelogSection(version);
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  if (!section) return null;
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="wn-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="wn-head">
+          <span className="logo"><span className="logo-mark">◆</span> What's new in v{version}</span>
+          <button className="tab-x" onClick={onClose}>✕</button>
+        </div>
+        <div className="wn-body md"><Markdown>{section.replace(/^## .*$/m, "")}</Markdown></div>
+        <div className="wn-foot">
+          <button className="sm-btn primary" onClick={onClose}>Nice — got it</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const TOUR = [
+  {
+    icon: "▶",
+    title: "Sessions live in tabs",
+    body: "Start a session in any folder, or press ⧉ to resume any Claude Code session on this machine — full history included. Drag tabs to reorder, double-click to rename.",
+  },
+  {
+    icon: "❯",
+    title: "Terminal + conversation, side by side",
+    body: "The left pane is the real claude CLI — type there as normal. The right pane lays the conversation out as collapsible turns: search it, expand tool calls and diffs, export it.",
+  },
+  {
+    icon: "⌨",
+    title: "Your left hand drives",
+    body: "Ctrl+Shift+T new session · Ctrl+Shift+R resume · Ctrl+Shift+F search · Ctrl+Tab switch tabs. Press Ctrl+Shift+D anytime for the full list.",
+  },
+];
+
+function Welcome({ onDone }) {
+  const [i, setI] = useState(0);
+  const last = i === TOUR.length - 1;
+  return (
+    <div className="modal-backdrop">
+      <div className="wn-modal welcome" role="dialog" aria-modal="true">
+        <div className="tour-icon">{TOUR[i].icon}</div>
+        <h3 className="tour-title">{TOUR[i].title}</h3>
+        <p className="tour-body">{TOUR[i].body}</p>
+        <div className="tour-dots">
+          {TOUR.map((_, d) => <span key={d} className={"tour-dot" + (d === i ? " on" : "")} />)}
+        </div>
+        <div className="wn-foot">
+          <button className="sm-btn ghost" onClick={onDone}>Skip</button>
+          <button className="sm-btn primary" onClick={() => (last ? onDone() : setI(i + 1))}>
+            {last ? "Get started" : "Next"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // Keyboard cheat-sheet (Ctrl+Shift+D). Primary bindings are left-hand-only so
 // the right hand can stay on the mouse.
@@ -389,8 +483,27 @@ export default function App() {
   const [renameVal, setRenameVal] = useState("");
   const [ctxMenu, setCtxMenu] = useState(null); // {id, x, y} — tab context menu
   const [hotkeysOpen, setHotkeysOpen] = useState(false);
+  const [whatsNew, setWhatsNew] = useState(null); // version string when shown
+  const [welcomeOpen, setWelcomeOpen] = useState(false);
   const dragTab = useRef(null);
   const feedSearchRef = useRef(null);
+
+  // Post-update "what's new" (once per version) + first-run welcome tour.
+  useEffect(() => {
+    getVersion().then((v) => {
+      const seen = localStorage.getItem(SEEN_VERSION_KEY);
+      if (!localStorage.getItem(TOURED_KEY)) {
+        setWelcomeOpen(true);
+      } else if (seen && seen !== v) {
+        setWhatsNew(v);
+      }
+      localStorage.setItem(SEEN_VERSION_KEY, v);
+    }).catch(() => {});
+  }, []);
+  function finishWelcome() {
+    try { localStorage.setItem(TOURED_KEY, "1"); } catch {}
+    setWelcomeOpen(false);
+  }
 
   // App-level hotkeys (terminal-safe: Ctrl+Shift+letter + a few Ctrl combos
   // shells never see). The handler closures are refreshed every render via a
@@ -469,7 +582,21 @@ export default function App() {
       if (delta.length > 0) {
         setBusyById((b) => ({ ...b, [t.id]: true }));
         clearTimeout(busyTimers.current[t.id]);
-        busyTimers.current[t.id] = setTimeout(() => setBusyById((b) => ({ ...b, [t.id]: false })), 2500);
+        // Track activity that happened while the user was elsewhere; when the
+        // stream goes quiet, that's "Claude finished" → toast (if enabled).
+        const away = t.id !== activeIdRef.current || !document.hasFocus();
+        if (away) bgWorkRef.current[t.id] = (bgWorkRef.current[t.id] || 0) + delta.length;
+        busyTimers.current[t.id] = setTimeout(() => {
+          setBusyById((b) => ({ ...b, [t.id]: false }));
+          const steps = bgWorkRef.current[t.id] || 0;
+          bgWorkRef.current[t.id] = 0;
+          const stillAway = t.id !== activeIdRef.current || !document.hasFocus();
+          if (steps > 0 && stillAway && filtersRef.current.notifyOnFinish) {
+            const tab = tabsRef.current.find((x) => x.id === t.id);
+            const name = tab?.title || (tab?.cwd || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "Session";
+            toast(`◆ ${name}`, `Claude finished — ${steps} new step${steps > 1 ? "s" : ""}.`);
+          }
+        }, 2500);
         if (t.id !== activeIdRef.current) setNewById((n) => ({ ...n, [t.id]: true }));
       }
       setConvos((c) => {
@@ -490,6 +617,9 @@ export default function App() {
   // Keep a live view of convos for `since` computation without re-subscribing.
   const convosRef = useRef(convos);
   convosRef.current = convos;
+  const filtersRef = useRef(filters);
+  filtersRef.current = filters;
+  const bgWorkRef = useRef({}); // tabId -> steps that arrived while away
 
   // Event-driven updates: the backend emits syn2:changed when a transcript
   // grows; a slow interval is only a safety net (and covers `ready` flips).
@@ -751,6 +881,32 @@ export default function App() {
     ? turns
     : turns.slice(turns.length - TURN_CAP);
 
+  // Paint search-match highlights over the rendered feed via the CSS Custom
+  // Highlight API — no DOM mutation, so it works identically across markdown,
+  // plain text and tool output. Re-runs whenever the feed's content changes.
+  useEffect(() => {
+    if (typeof CSS === "undefined" || !CSS.highlights || typeof Highlight === "undefined") return;
+    CSS.highlights.delete("syn-search");
+    if (!searching || !feedRef.current) return;
+    const ranges = [];
+    const walker = document.createTreeWalker(feedRef.current, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode()) && ranges.length < 2000) {
+      const text = node.nodeValue || "";
+      const lower = text.toLowerCase();
+      let i = lower.indexOf(q);
+      while (i !== -1 && ranges.length < 2000) {
+        const r = new Range();
+        r.setStart(node, i);
+        r.setEnd(node, i + q.length);
+        ranges.push(r);
+        i = lower.indexOf(q, i + q.length);
+      }
+    }
+    if (ranges.length) CSS.highlights.set("syn-search", new Highlight(...ranges));
+    return () => CSS.highlights.delete("syn-search");
+  }, [q, searching, messages, expandById, activeId, showAllTurns]);
+
   // Auto-follow: stick to the bottom of the feed unless the user scrolled up.
   const feedRef = useRef(null);
   const stickRef = useRef(true);
@@ -814,6 +970,8 @@ export default function App() {
         {browserModal}
         {settingsModal}
         {hotkeysOpen && <HotkeySheet onClose={() => setHotkeysOpen(false)} />}
+        {welcomeOpen && <Welcome onDone={finishWelcome} />}
+        {!welcomeOpen && whatsNew && <WhatsNew version={whatsNew} onClose={() => setWhatsNew(null)} />}
       </div>
     );
   }
@@ -850,10 +1008,20 @@ export default function App() {
     }
   }
 
+  // A session likely "needs attention" when its last activity was a tool call
+  // and the stream has gone quiet — typically Claude waiting for an approval
+  // in the terminal. Heuristic, so it's a hint, not an alarm.
+  function tabAttention(id) {
+    const msgs = convos[id]?.messages;
+    const last = msgs && msgs[msgs.length - 1];
+    return !!last && last.kind === "toolcall" && !busyById[id];
+  }
+
   const tabBar = (
     <div className={"tabbar " + tabPos}>
       {tabs.map((t) => {
         const name = t.title || (t.cwd || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop() || t.cwd;
+        const attn = tabAttention(t.id);
         return (
           <div
             key={t.id}
@@ -867,8 +1035,12 @@ export default function App() {
             onDoubleClick={() => { setRenamingTab(t.id); setRenameVal(t.title || name); }}
             onContextMenu={(e) => { e.preventDefault(); setCtxMenu({ id: t.id, x: e.clientX, y: e.clientY }); }}
           >
-            {t.id !== activeTab.id && newById[t.id] && (
-              <span className={"tab-dot" + (busyById[t.id] ? " working" : "")} title={busyById[t.id] ? "Working…" : "New activity"} />
+            {attn ? (
+              <span className="tab-dot attention" title="May be waiting for your approval in the terminal" />
+            ) : (
+              t.id !== activeTab.id && newById[t.id] && (
+                <span className={"tab-dot" + (busyById[t.id] ? " working" : "")} title={busyById[t.id] ? "Working…" : "New activity"} />
+              )
             )}
             {renamingTab === t.id ? (
               <form className="tab-rename" onSubmit={(e) => { e.preventDefault(); commitTabRename(t); }}>
@@ -910,7 +1082,12 @@ export default function App() {
           )}
           <LimitChip icon="⏱" label="session" win={rateLimits?.rateLimits?.five_hour} />
           <LimitChip icon="📅" label="week" win={rateLimits?.rateLimits?.seven_day} />
-          <div className="run-state">{busy ? <span className="pulse">● working…</span> : ready ? `${turns.length} turn(s)` : ""}</div>
+          <div className="run-state">
+            {tabAttention(activeTab.id) && !busy && (
+              <span className="attn-hint" title="The last activity was a tool call with no result yet — Claude may be waiting for you in the terminal">⚠ waiting?</span>
+            )}
+            {busy ? <span className="pulse">● working…</span> : ready ? `${turns.length} turn(s)` : ""}
+          </div>
           <button className="filters-btn hk-btn" onClick={() => setHotkeysOpen(true)} title="Keyboard shortcuts (Ctrl+Shift+D)">⌨</button>
           <button className="filters-btn" onClick={() => openSettings("appearance")} title="Settings">⚙ Settings</button>
         </header>
@@ -1051,6 +1228,7 @@ export default function App() {
       {browserModal}
       {settingsModal}
       {hotkeysOpen && <HotkeySheet onClose={() => setHotkeysOpen(false)} />}
+      {whatsNew && <WhatsNew version={whatsNew} onClose={() => setWhatsNew(null)} />}
     </div>
   );
 }

@@ -43,7 +43,10 @@ fn head_info(path: &Path) -> (String, String) {
             }
         }
         if title.is_empty() {
-            if let Some(s) = v.get("summary").and_then(|s| s.as_str()) {
+            if let Some(s) = v.get("aiTitle").and_then(|s| s.as_str()) {
+                // Claude Code's own generated session title — the best label.
+                title = s.to_string();
+            } else if let Some(s) = v.get("summary").and_then(|s| s.as_str()) {
                 title = s.to_string();
             } else if v.get("type").and_then(|t| t.as_str()) == Some("user") {
                 let content = v.get("message").and_then(|m| m.get("content"));
@@ -92,8 +95,13 @@ fn meta_for(p: &Path) -> Option<SessionMeta> {
 }
 
 /// All sessions on this machine, grouped by project, newest activity first.
+///
+/// `async` so Tauri runs it on the async runtime rather than the main/UI thread:
+/// on a large `~/.claude` history this walks every project dir and head-parses
+/// every transcript, which would otherwise freeze the window (and the embedded
+/// terminal) until the scan finished.
 #[tauri::command]
-pub fn list_claude_sessions() -> Vec<ProjectSessions> {
+pub async fn list_claude_sessions() -> Vec<ProjectSessions> {
     let Some(root) = crate::claude_projects_dir() else { return Vec::new() };
     let Ok(projects) = std::fs::read_dir(&root) else { return Vec::new() };
     let mut out: Vec<ProjectSessions> = Vec::new();
@@ -139,10 +147,16 @@ pub struct SearchHit {
 
 /// Case-insensitive text search across every transcript. Capped so a huge
 /// store can't wedge the UI: max 50 sessions returned, files > 25 MB skipped.
+///
+/// `async` so the whole-store scan runs off the main/UI thread — a no-match
+/// query still reads every transcript, so on a large history a synchronous
+/// version would freeze the window for the duration of the scan.
 #[tauri::command]
-pub fn search_sessions(query: String) -> Vec<SearchHit> {
+pub async fn search_sessions(query: String) -> Vec<SearchHit> {
     let q = query.trim().to_lowercase();
-    if q.len() < 2 {
+    // Guard in chars, not bytes, so a single multibyte char (e.g. an emoji whose
+    // JS string length is 2) can't slip a 1-character query past the length gate.
+    if q.chars().count() < 2 {
         return Vec::new();
     }
     let Some(root) = crate::claude_projects_dir() else { return Vec::new() };

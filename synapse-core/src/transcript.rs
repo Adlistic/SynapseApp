@@ -79,8 +79,11 @@ fn tool_preview(name: &str, input: &Value) -> String {
     .or_else(|| pick(&["description", "subject", "command", "pattern", "query", "url", "file_path", "path"]))
     .unwrap_or_default();
     let one_line = raw.replace('\n', " ");
-    if one_line.len() > 160 {
-        format!("{}…", &one_line[..160])
+    // Truncate by CHARACTERS, not bytes: `&one_line[..160]` byte-slicing panics
+    // ("not a char boundary") when a multibyte char straddles byte 160 — and this
+    // runs on the tailer thread, so a panic would kill the live feed.
+    if one_line.chars().count() > 160 {
+        format!("{}…", one_line.chars().take(160).collect::<String>())
     } else {
         one_line
     }
@@ -110,6 +113,18 @@ pub fn parse_entry(entry: &Value, ts: i64, agent_id: Option<&str>) -> Vec<Messag
     // The actual message lives under `message`; stream-json `result`/`system`
     // events are skipped (they carry no renderable content blocks here).
     let entry_type = entry.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Harness-injected entries (skill loads, context refreshes, …) are marked
+    // `isMeta` and are NOT shown by Claude Code's own UI — skip them so they
+    // don't render as if the user typed them.
+    if entry
+        .get("isMeta")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return out;
+    }
+
     let message = match entry.get("message") {
         Some(m) => m,
         None => return out,
@@ -148,6 +163,7 @@ pub fn parse_entry(entry: &Value, ts: i64, agent_id: Option<&str>) -> Vec<Messag
             }
         }
         Value::Array(blocks) => {
+            let start_len = out.len();
             for block in blocks {
                 let btype = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 match btype {
@@ -156,7 +172,14 @@ pub fn parse_entry(entry: &Value, ts: i64, agent_id: Option<&str>) -> Vec<Messag
                         if text.trim().is_empty() {
                             continue;
                         }
-                        let kind = if text.trim_end().ends_with('?') {
+                        // A user prompt can arrive as an ARRAY (not a bare string)
+                        // when it carries an attachment/image. Such text blocks must
+                        // stay MessageKind::User so the frontend groups them as a
+                        // turn-starting prompt — never the assistant Question/Message
+                        // kinds (which would fold the prompt into the previous turn).
+                        let kind = if role == "user" {
+                            MessageKind::User
+                        } else if text.trim_end().ends_with('?') {
                             MessageKind::Question
                         } else {
                             MessageKind::Message
@@ -221,6 +244,12 @@ pub fn parse_entry(entry: &Value, ts: i64, agent_id: Option<&str>) -> Vec<Messag
                     _ => {}
                 }
             }
+            // An image-only / attachment-only user prompt has no text block, so
+            // the loop above produced nothing — surface it as a user turn anyway
+            // so the prompt doesn't silently vanish and turn-grouping stays aligned.
+            if role == "user" && out.len() == start_len && !blocks.is_empty() {
+                out.push(mk(MessageKind::User, "[image]".to_string()));
+            }
         }
         _ => {}
     }
@@ -244,11 +273,32 @@ pub fn parse_entry(entry: &Value, ts: i64, agent_id: Option<&str>) -> Vec<Messag
 fn stringify_result(content: Option<&Value>) -> String {
     match content {
         Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
-            .collect::<Vec<_>>()
-            .join("\n"),
+        Some(Value::Array(arr)) => {
+            let joined = arr
+                .iter()
+                .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !joined.is_empty() {
+                return joined;
+            }
+            // No text blocks (e.g. an image result from reading a PNG). Label each
+            // block by its `type` so the result bubble isn't blank.
+            arr.iter()
+                .map(|b| format!("[{}]", b.get("type").and_then(|v| v.as_str()).unwrap_or("content")))
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        // A single structured object rather than a string/array — show a compact
+        // preview instead of an empty bubble.
+        Some(v @ Value::Object(_)) => {
+            let s = v.to_string();
+            if s.chars().count() > 200 {
+                format!("{}…", s.chars().take(200).collect::<String>())
+            } else {
+                s
+            }
+        }
         _ => String::new(),
     }
 }
@@ -332,6 +382,41 @@ mod tests {
         assert_eq!(m[0].kind, MessageKind::Plan);
         assert!(m[0].text.contains("# Plan"));
         assert_eq!(m[0].tool_category, Some(ToolCategory::Plan));
+    }
+
+    #[test]
+    fn user_prompt_with_attachment_array_is_user_kind() {
+        // A human prompt that carries an image arrives as an ARRAY, not a bare
+        // string. The text block must stay MessageKind::User (not Question/Message)
+        // so the frontend groups it as a turn-starting prompt.
+        let line = r#"{"type":"user","sessionId":"s1","message":{"role":"user","content":[
+            {"type":"text","text":"What is this screenshot?"},
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}
+        ]}}"#;
+        let msgs = parse_line(line, 100, None);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].kind, MessageKind::User);
+        assert_eq!(msgs[0].text, "What is this screenshot?");
+    }
+
+    #[test]
+    fn image_only_user_prompt_is_not_dropped() {
+        let line = r#"{"type":"user","sessionId":"s1","message":{"role":"user","content":[
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}
+        ]}}"#;
+        let msgs = parse_line(line, 100, None);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].kind, MessageKind::User);
+    }
+
+    #[test]
+    fn tool_result_image_content_is_not_blank() {
+        let line = r#"{"type":"user","message":{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"t1","content":[{"type":"image","source":{"type":"base64","data":"AAAA"}}]}
+        ]}}"#;
+        let m = parse_line(line, 1, None);
+        assert_eq!(m[0].kind, MessageKind::ToolResult);
+        assert_eq!(m[0].text, "[image]");
     }
 
     #[test]

@@ -137,8 +137,12 @@ pub async fn get_entitlement() -> Result<Value, String> {
         return Ok(json!({ "linked": false }));
     };
 
+    // Bounded timeouts so a captive portal / half-open connection can't hang the
+    // whole app on "Checking your account…" (reqwest has NO default timeout).
     let client = reqwest::Client::builder()
         .user_agent("Synapse-Suite")
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -147,12 +151,25 @@ pub async fn get_entitlement() -> Result<Value, String> {
         client.get(&url).header("X-User-Token", token).send()
     };
 
+    // Read a response as (status, body, parsed_ok). `parsed_ok` is false when the
+    // body wasn't the expected JSON object — e.g. a captive-portal HTML page that
+    // answers 200, or a 5xx error page. The frontend must NOT treat a non-parsed
+    // response as an authoritative "not entitled" (that would lock out a paying
+    // user during an outage); only a clean 200-with-JSON may downgrade to free.
+    async fn read_ent(resp: reqwest::Response) -> (u16, Value, bool) {
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        match serde_json::from_str::<Value>(&text) {
+            Ok(v) if v.is_object() => (status, v, true),
+            _ => {
+                tracing::warn!(target: "synapse2", status, "auth response was not a JSON object");
+                (status, json!({}), false)
+            }
+        }
+    }
+
     let resp = fetch_ent(&client, &token).await.map_err(|e| e.to_string())?;
-    let mut status = resp.status().as_u16();
-    let mut body: Value = resp.json().await.unwrap_or_else(|e| {
-        tracing::warn!(target: "synapse2", error = %e, "auth response was not JSON");
-        json!({})
-    });
+    let (mut status, mut body, mut parsed) = read_ent(resp).await;
 
     // 409 = the claim was never finalized (claimed_at null). Finalize once,
     // then retry — and ONLY then, so a healthy account never pays the extra
@@ -162,11 +179,10 @@ pub async fn get_entitlement() -> Result<Value, String> {
             tracing::warn!(target: "synapse2", error = %e, "claim finalize failed");
         }
         if let Ok(resp2) = fetch_ent(&client, &token).await {
-            status = resp2.status().as_u16();
-            body = resp2.json().await.unwrap_or_else(|e| {
-                tracing::warn!(target: "synapse2", error = %e, "auth response was not JSON");
-                json!({})
-            });
+            let (s, b, p) = read_ent(resp2).await;
+            status = s;
+            body = b;
+            parsed = p;
         }
     }
 
@@ -177,6 +193,8 @@ pub async fn get_entitlement() -> Result<Value, String> {
     Ok(json!({
         "linked": !revoked,
         "http_status": status,
+        // Whether the body was authoritative JSON (see read_ent).
+        "parsed": parsed,
         "suite_access": body.get("suite_access").and_then(Value::as_bool).unwrap_or(false),
         "plan": body.get("plan").cloned().unwrap_or(Value::Null),
         "status": body.get("status").cloned().unwrap_or(Value::Null),
@@ -223,11 +241,16 @@ fn urldecode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
+        // Slice the BYTE array (never the &str): `&s[i+1..i+3]` panics when a
+        // multibyte char follows a '%' (e.g. `%€`) because the slice lands off a
+        // char boundary. Hostile deep links can reach this, so avoid str slicing.
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(b);
-                i += 3;
-                continue;
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(b) = u8::from_str_radix(hex, 16) {
+                    out.push(b);
+                    i += 3;
+                    continue;
+                }
             }
         }
         out.push(bytes[i]);

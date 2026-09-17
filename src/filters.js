@@ -66,6 +66,7 @@ export const DEFAULT_FILTERS = {
   warpSpeed: 1, // aurora blob speed: 0 (off) | 0.5 | 1 | 2 | 4
   tabPosition: "top", // "top" | "left"
   showComposer: false, // input box under the terminal (off = type in the console)
+  autoCollapseOnSend: false, // on a new message, collapse all turns but the one just sent
   theme: "dark", // "dark" | "light" | "system"
   accent: null, // custom accent hex (null = palette default)
   notifyOnFinish: true, // Windows toast when a background session finishes work
@@ -90,6 +91,37 @@ export const BG_PRESETS = [
 
 // --- Recent folders (most-recent-first, deduped) ---------------------------
 const RECENT_KEY = "synapse2.recentFolders.v1";
+
+// ── Project identity ──────────────────────────────────────────────────
+// Multiple sessions can run in the same folder; these helpers give every
+// project a stable name and color so its sessions read as siblings.
+
+/// Canonical key for comparing project roots (Windows paths are case-insensitive).
+export function normRoot(p) {
+  return (p || "").toLowerCase().replace(/[\\/]+$/, "");
+}
+
+export function baseNameOf(p) {
+  return (p || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p || "";
+}
+
+// Deterministic per-project identity color: hue hashed from the root path,
+// saturation/lightness fixed so it reads on both themes.
+export function projectColor(root) {
+  const s = normRoot(root);
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return `hsl(${h % 360}, 62%, 52%)`;
+}
+
+// Display name for a tab: manual rename wins; otherwise the PROJECT folder's
+// basename (not the cwd — a worktree cwd's basename is a hex id), plus a
+// stable " · N" suffix for second-and-later sessions in the same folder.
+export function tabDisplayName(t) {
+  if (t.title) return t.title;
+  const base = baseNameOf(t.root || t.cwd);
+  return t.dupSeq > 1 ? `${base} · ${t.dupSeq}` : base;
+}
 
 export function loadRecentFolders() {
   try {

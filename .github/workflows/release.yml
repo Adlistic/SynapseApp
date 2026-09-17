@@ -17,6 +17,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Fail fast if someone tags vX.Y.Z without bumping the version baked into the
+      # artifacts + latest.json — otherwise the updater ships a build that reports
+      # the old version and never updates anyone.
+      - name: Verify tag matches app version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}" -replace '^v',''
+          $conf = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $cargo = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version\s*=\s*"(.+)"').Matches[0].Groups[1].Value
+          $mismatch = @()
+          if ($tag -ne $conf)  { $mismatch += "tauri.conf.json=$conf" }
+          if ($tag -ne $pkg)   { $mismatch += "package.json=$pkg" }
+          if ($tag -ne $cargo) { $mismatch += "Cargo.toml=$cargo" }
+          if ($mismatch.Count -gt 0) {
+            Write-Error "Tag '$tag' does not match: $($mismatch -join ', '). Bump the version in tauri.conf.json / package.json / Cargo.toml (all three) before tagging."
+            exit 1
+          }
+          Write-Host "Version OK across all manifests: $conf"
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:

@@ -110,6 +110,9 @@ pub struct LogGuard {
 /// calls are no-ops.
 pub fn init(log_dir: &Path, console: bool) -> std::io::Result<(LogGuard, LogBuffer)> {
     std::fs::create_dir_all(log_dir)?;
+    // The daily-rolling appender never deletes old files, so a long-lived install
+    // would accumulate one `synapse.log.<date>` per day forever. Cap retention.
+    prune_old_logs(log_dir, 14);
     let file_appender = tracing_appender::rolling::daily(log_dir, "synapse.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
@@ -164,6 +167,35 @@ pub fn write_run_log(log_dir: &Path, run_id: &str, lines: &[LogLine]) -> std::io
     }
     std::fs::write(&path, body)?;
     Ok(path)
+}
+
+/// Keep only the `keep` most recently modified `synapse.log*` files in `log_dir`,
+/// deleting older daily-rolled logs so the directory stays bounded. Best-effort:
+/// any I/O error is ignored (logging must never fail startup).
+fn prune_old_logs(log_dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(log_dir) else {
+        return;
+    };
+    let mut logs: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| n.starts_with("synapse.log"))
+                .unwrap_or(false)
+        })
+        .filter_map(|e| {
+            let modified = e.metadata().ok()?.modified().ok()?;
+            Some((modified, e.path()))
+        })
+        .collect();
+    if logs.len() <= keep {
+        return;
+    }
+    logs.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+    for (_, path) in logs.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// The default log directory: `~/.synapse/logs`.

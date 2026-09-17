@@ -8,6 +8,8 @@ import changelogRaw from "../CHANGELOG.md?raw";
 import TerminalPane from "./TerminalPane.jsx";
 import SettingsModal from "./SettingsModal.jsx";
 import SessionBrowser from "./SessionBrowser.jsx";
+import Dashboard, { statusFor } from "./Dashboard.jsx";
+import { useUpdateStatus, installUpdate, dismissUpdate } from "./updater.js";
 import Background from "./Background.jsx";
 import DiffView from "./DiffView.jsx";
 import Markdown from "./Markdown.jsx";
@@ -19,6 +21,10 @@ import {
   saveFilters,
   loadRecentFolders,
   addRecentFolder,
+  normRoot,
+  baseNameOf,
+  projectColor,
+  tabDisplayName,
   saveTitle,
   messageDisplay,
   resolveCategory,
@@ -50,6 +56,11 @@ const CAT_LABEL = Object.fromEntries(TOOL_CATS.map((c) => [c.key, c.label]));
 const SPLIT_KEY = "synapse2.split.v1";
 function loadSplit() { const v = parseFloat(localStorage.getItem(SPLIT_KEY)); return v >= 20 && v <= 80 ? v : 58; }
 function saveSplit(v) { try { localStorage.setItem(SPLIT_KEY, String(Math.round(v))); } catch {} }
+
+// Persisted left tab-rail width (px), used when tab position is "left".
+const RAILW_KEY = "synapse2.railw.v1";
+function loadRailW() { const v = parseFloat(localStorage.getItem(RAILW_KEY)); return v >= 150 && v <= 340 ? v : 190; }
+function saveRailW(v) { try { localStorage.setItem(RAILW_KEY, String(Math.round(v))); } catch {} }
 
 // Render only this many turns by default; older ones sit behind "show earlier".
 const TURN_CAP = 120;
@@ -92,8 +103,45 @@ function LimitChip({ icon, label, win }) {
   );
 }
 
+// Slim strip shown only when an update is downloaded, verified, and waiting —
+// the download itself happens silently in Rust (see src-tauri/src/updater.rs).
+// Installing restarts the app, which ends every running claude session, so it
+// is always the user's click, never automatic.
+function UpdateBar() {
+  const st = useUpdateStatus();
+  if (st.status === "ready") {
+    return (
+      <div className="update-bar" title={st.notes ? `What's in ${st.version}:\n${st.notes}` : undefined}>
+        <span className="update-msg">⬆ Synapse {st.version} is downloaded and ready.</span>
+        <button
+          className="update-go"
+          onClick={() => installUpdate().catch(() => {})}
+          title="Installs and relaunches — finish any running Claude turn first: restarting closes every session"
+        >
+          Restart to update
+        </button>
+        <button
+          className="update-later"
+          onClick={() => dismissUpdate(st.version)}
+          title="Skip this version — the next release will show again"
+        >
+          Skip
+        </button>
+      </div>
+    );
+  }
+  if (st.status === "installing") {
+    return <div className="update-bar"><span className="update-msg">Installing Synapse {st.version}…</span></div>;
+  }
+  return null;
+}
+
 const CMD_RE = /^\s*<command-name>([^<]*)<\/command-name>/;
 const LOCAL_RE = /^\s*<local-command-(stdout|caveat)>/;
+// Harness injections Claude Code's own UI hides: <system-reminder> blocks
+// (skill loads, context refreshes) embedded in user text and tool results.
+const stripReminders = (s) =>
+  (s || "").replace(/<system-reminder>[\s\S]*?(<\/system-reminder>|$)/g, "").trim();
 const stripAnsi = (s) => (s || "").replace(/\[[0-9;]*m/g, "");
 
 // Group a flat parsed transcript into turns keyed by the user's prompts.
@@ -114,10 +162,14 @@ function groupTurns(messages) {
         continue;
       }
       const cmd = CMD_RE.exec(text);
+      const isNotif = /^\s*<task-notification>|^\s*\[SYSTEM NOTIFICATION/i.test(text);
+      const cleaned = cmd ? cmd[1].trim() : isNotif ? "" : stripReminders(stripAnsi(text));
+      if (!cmd && !isNotif && !cleaned) continue; // pure injection — not a real turn
       cur = {
         id: m.id,
-        prompt: cmd ? cmd[1].trim() : stripAnsi(text),
-        isCommand: !!cmd,
+        prompt: cmd ? cleaned : isNotif ? "background task notification" : cleaned,
+        isCommand: !!cmd || isNotif,
+        isNotif,
         ts: m.ts,
         responses: [],
       };
@@ -130,29 +182,98 @@ function groupTurns(messages) {
   return turns;
 }
 
-// Memoized: a turn's responses don't change once the next turn starts, so the
-// markdown/diff work for old bubbles never re-runs on poll updates.
-const ResponseBubble = memo(function ResponseBubble({ m }) {
-  const color = displayColor(KIND_COLORS[m.kind] || "#9fb0c9", isLightTheme());
-  const head =
-    m.kind === "toolcall" ? `▸ ${m.toolName || "tool"}${m.toolCategory ? " · " + m.toolCategory : ""}` :
-    m.kind === "toolresult" ? "⤷ result" :
-    m.kind === "error" ? "✗ error" :
-    m.kind === "plan" ? "⌑ plan" :
-    m.kind === "thinking" ? "… thinking" :
-    m.kind === "question" ? "? question" : "assistant";
-  const clamp = m.kind === "thinking" || m.kind === "toolresult";
+// ─── agent-style response rendering ─────────────────────────────────────────
+// Claude's prose is the star: it flows unboxed. Tool calls pair with their
+// results into one compact expandable row; thinking collapses to a one-liner.
+
+// Assistant text / question — plain flowing markdown.
+const Prose = memo(function Prose({ m }) {
   return (
-    <div className="rsp" style={{ borderLeftColor: color }}>
-      <div className="rsp-head" style={{ color }}>{head}</div>
-      {(m.kind === "message" || m.kind === "question" || m.kind === "plan") ? (
-        <Markdown>{m.text}</Markdown>
-      ) : (
-        <div className={"rsp-text" + (clamp ? " clamp" : "")}>{m.text}</div>
-      )}
-      {m.kind === "toolcall" && m.editData && <DiffView editData={m.editData} toolName={m.toolName} />}
+    <div className="prose md">
+      <Markdown>{m.text}</Markdown>
     </div>
   );
+});
+
+// Plans keep a light frame — they're artifacts worth visually separating.
+const PlanBlock = memo(function PlanBlock({ m }) {
+  const color = displayColor(KIND_COLORS.plan, isLightTheme());
+  return (
+    <div className="plan-block" style={{ borderLeftColor: color }}>
+      <div className="plan-cap" style={{ color }}>⌑ plan</div>
+      <Markdown>{m.text}</Markdown>
+    </div>
+  );
+});
+
+const RESULT_CLAMP_LINES = 12;
+
+// One tool call + its result(s) as a single expandable row:
+//   ▸ Read src/auth.js · 120 lines
+const ToolRow = memo(function ToolRow({ call, results }) {
+  const failed = results.some((r) => r.isError || r.is_error);
+  const [open, setOpen] = useState(failed); // errors start expanded
+  const [showAll, setShowAll] = useState(false);
+  const m = call || results[0];
+  const color = displayColor(
+    failed ? KIND_COLORS.error : (CAT_COLOR[m.toolCategory] || KIND_COLORS.toolcall),
+    isLightTheme()
+  );
+  const resultText = stripReminders(results.map((r) => r.text || "").join("\n")).trimEnd();
+  const lines = resultText ? resultText.split("\n") : [];
+  const summary = failed
+    ? "failed"
+    : call?.editData
+    ? "edit"
+    : lines.length > 1
+    ? `${lines.length} lines`
+    : lines.length === 1 && lines[0].length
+    ? lines[0].slice(0, 60)
+    : "done";
+  const shown = showAll ? lines : lines.slice(0, RESULT_CLAMP_LINES);
+  return (
+    <div className={"trow" + (failed ? " failed" : "")}>
+      <button className="trow-head" onClick={() => setOpen((v) => !v)} title={m.text}>
+        <span className="trow-chev">{open ? "▾" : "▸"}</span>
+        <span className="trow-name" style={{ color }}>{call ? call.toolName || "tool" : "result"}</span>
+        <span className="trow-preview">{call ? call.text : ""}</span>
+        <span className="trow-sum">{summary}</span>
+      </button>
+      {open && (
+        <div className="trow-body">
+          {call?.editData && <DiffView editData={call.editData} toolName={call.toolName} />}
+          {lines.length > 0 && !call?.editData && (
+            <>
+              <pre className="trow-out">{shown.join("\n")}</pre>
+              {lines.length > RESULT_CLAMP_LINES && (
+                <button className="trow-more" onClick={() => setShowAll((v) => !v)}>
+                  {showAll ? "show less" : `show all ${lines.length} lines`}
+                </button>
+              )}
+            </>
+          )}
+          {lines.length === 0 && !call?.editData && <div className="trow-out empty">no output</div>}
+        </div>
+      )}
+    </div>
+  );
+});
+
+// "… thought for a moment" — reasoning on demand, never in the way.
+const ThinkingRow = memo(function ThinkingRow({ m }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="think-row">
+      <button className="think-head" onClick={() => setOpen((v) => !v)}>
+        … thought for a moment {open ? "▾" : "▸"}
+      </button>
+      {open && <pre className="think-body">{m.text}</pre>}
+    </div>
+  );
+});
+
+const ErrorRow = memo(function ErrorRow({ m }) {
+  return <div className="err-row">✗ {m.text}</div>;
 });
 
 // Filtered-out tools collapse into a row (ClaudeConnect style): consecutive
@@ -266,6 +387,7 @@ const HOTKEYS = [
   ["Ctrl+Shift+F", "Search this session"],
   ["Ctrl+Shift+E", "Export conversation (Markdown)"],
   ["Ctrl+Shift+G", "Jump to latest turn"],
+  ["Ctrl+Shift+B", "Mission Control (dashboard)"],
   ["Ctrl+Shift+S", "Settings"],
   ["Ctrl+Shift+D", "This cheat-sheet"],
   ["Esc", "Close any overlay"],
@@ -322,26 +444,44 @@ const TurnCard = memo(function TurnCard({ t, expanded, live, matchCount = 0, fil
       {expanded && (
         <div className="tcard-body">
           {items.length === 0 && <div className="empty">{live ? "● working…" : "No responses."}</div>}
-          {items.map((it, i) =>
-            it.type === "full" ? (
-              <ResponseBubble key={it.m.id} m={it.m} />
-            ) : (
-              <div key={"row" + i} className="pill-row">
-                {it.groups.map((g, j) =>
-                  g.variant === "pill" ? <PillFull key={j} g={g} /> : <PillDot key={j} g={g} />
-                )}
-              </div>
-            )
-          )}
+          {items.map((it, i) => {
+            switch (it.type) {
+              case "prose": return <Prose key={it.m.id} m={it.m} />;
+              case "plan": return <PlanBlock key={it.m.id} m={it.m} />;
+              case "tool": return <ToolRow key={(it.call || it.results[0]).id} call={it.call} results={it.results} />;
+              case "thinking": return <ThinkingRow key={it.m.id} m={it.m} />;
+              case "error": return <ErrorRow key={it.m.id} m={it.m} />;
+              default: return (
+                <div key={"row" + i} className="pill-row">
+                  {it.groups.map((g, j) =>
+                    g.variant === "pill" ? <PillFull key={j} g={g} /> : <PillDot key={j} g={g} />
+                  )}
+                </div>
+              );
+            }
+          })}
         </div>
       )}
     </div>
   );
 });
 
-// Collapse a turn's responses into render items: 'full' bubbles, and 'pillrow'
-// runs of consecutive filtered tools (grouped by category with counts).
+// Collapse a turn's responses into render items: flowing prose, paired
+// tool rows (call + its results matched via toolUseId), thinking expanders,
+// and 'pillrow' runs of consecutive filtered-out tools.
 function buildItems(responses, filters, catById) {
+  // Pair every tool result with its originating call up front.
+  const resultsByUse = {};
+  for (const m of responses) {
+    // Include errored results (kind === "error") so a failed tool call's output
+    // attaches to its call row (which has dedicated failed-state UI) instead of
+    // rendering as a detached error bubble with the call left looking output-less.
+    if ((m.kind === "toolresult" || m.kind === "error") && m.toolUseId) {
+      (resultsByUse[m.toolUseId] = resultsByUse[m.toolUseId] || []).push(m);
+    }
+  }
+  const paired = new Set();
+
   const items = [];
   let run = [];
   const flush = () => {
@@ -355,11 +495,37 @@ function buildItems(responses, filters, catById) {
     items.push({ type: "pillrow", groups });
     run = [];
   };
+
   for (const m of responses) {
-    const disp = messageDisplay(m, filters, catById);
-    if (disp === "full") { flush(); items.push({ type: "full", m }); }
-    else if (disp === "hidden") { /* drop, keep the run contiguous */ }
-    else run.push({ m, disp, cat: resolveCategory(m, catById) });
+    if (m.kind === "toolcall") {
+      const results = (m.toolUseId && resultsByUse[m.toolUseId]) || [];
+      const disp = messageDisplay(m, filters, catById);
+      if (disp === "full") {
+        results.forEach((r) => paired.add(r.id));
+        flush();
+        items.push({ type: "tool", call: m, results });
+      } else if (disp === "hidden") {
+        results.forEach((r) => paired.add(r.id));
+      } else {
+        results.forEach((r) => paired.add(r.id));
+        run.push({ m, disp, cat: resolveCategory(m, catById) });
+      }
+    } else if (m.kind === "toolresult") {
+      if (paired.has(m.id)) continue; // shown inside its tool row
+      const disp = messageDisplay(m, filters, catById);
+      if (disp === "full") { flush(); items.push({ type: "tool", call: null, results: [m] }); }
+      else if (disp !== "hidden") run.push({ m, disp, cat: resolveCategory(m, catById) });
+    } else if (m.kind === "thinking") {
+      if (messageDisplay(m, filters, catById) === "full") { flush(); items.push({ type: "thinking", m }); }
+    } else if (m.kind === "error") {
+      if (paired.has(m.id)) continue; // already shown inside its tool row
+      if (messageDisplay(m, filters, catById) === "full") { flush(); items.push({ type: "error", m }); }
+    } else if (m.kind === "plan") {
+      if (messageDisplay(m, filters, catById) === "full") { flush(); items.push({ type: "plan", m }); }
+    } else {
+      // message / question / anything textual → flowing prose
+      if (messageDisplay(m, filters, catById) === "full") { flush(); items.push({ type: "prose", m }); }
+    }
   }
   flush();
   return items;
@@ -367,7 +533,9 @@ function buildItems(responses, filters, catById) {
 
 function Launch({ onStart, recent = [], onOpenSettings, onOpenBrowser, onCancel }) {
   const [folder, setFolder] = useState("");
-  const [fullAutonomy, setFullAutonomy] = useState(true);
+  // Default OFF: --dangerously-skip-permissions lets Claude run shell/edits/deletes
+  // with no prompts, so it must be a deliberate opt-in, not the default.
+  const [fullAutonomy, setFullAutonomy] = useState(false);
   const [worktrees, setWorktrees] = useState(false);
   const [error, setError] = useState("");
   const [orphans, setOrphans] = useState(0);
@@ -452,7 +620,7 @@ function Launch({ onStart, recent = [], onOpenSettings, onOpenBrowser, onCancel 
         )}
         <button className="start" onClick={go}>▶ Start session</button>
         <button className="resume-link" onClick={onOpenBrowser}>⧉ …or resume a previous session</button>
-        {error && <div className="error">{error}</div>}
+        {error && <div className="error" role="button" title="Dismiss" onClick={() => setError("")}>{error} <span className="error-x">✕</span></div>}
       </div>
     </div>
   );
@@ -476,6 +644,7 @@ export default function App() {
   const [settingsTab, setSettingsTab] = useState("appearance");
   const [recent, setRecent] = useState(loadRecentFolders());
   const [split, setSplit] = useState(loadSplit());
+  const [railW, setRailW] = useState(loadRailW());
   const [error, setError] = useState("");
   const [rateLimits, setRateLimits] = useState(null);
   const [searchQ, setSearchQ] = useState("");
@@ -483,6 +652,8 @@ export default function App() {
   const [renameVal, setRenameVal] = useState("");
   const [ctxMenu, setCtxMenu] = useState(null); // {id, x, y} — tab context menu
   const [hotkeysOpen, setHotkeysOpen] = useState(false);
+  const [dashOpen, setDashOpen] = useState(false);   // Mission Control overlay
+  const [dash, setDash] = useState(null);            // get_dashboard snapshot
   const [whatsNew, setWhatsNew] = useState(null); // version string when shown
   const [welcomeOpen, setWelcomeOpen] = useState(false);
   const dragTab = useRef(null);
@@ -535,6 +706,7 @@ export default function App() {
     latest: () => jumpToLatest(),
     settings: () => openSettings("appearance"),
     cheatsheet: () => setHotkeysOpen((v) => !v),
+    dashboard: () => setDashOpen((v) => !v),
   };
   useEffect(() => {
     // Primary bindings live in the LEFT-hand zone (QWERT/ASDFG + 1-5 + Tab)
@@ -558,6 +730,7 @@ export default function App() {
       if (k === "g" || k === "l") return go(h.latest); // G primary, L alias
       if (k === "s") return go(h.settings);
       if (k === "d") return go(h.cheatsheet);
+      if (k === "b") return go(h.dashboard);
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
@@ -578,6 +751,11 @@ export default function App() {
     try {
       const since = (convosRef.current[t.id]?.messages || []).length;
       const r = await invoke("get_conversation", { sessionId: t.sessionId, since });
+      // The tab may have been closed while this fetch was in flight (close +
+      // remove is synchronous, but the awaited round-trip is not). Bail before
+      // resurrecting any per-tab state — otherwise removeTab's cleanup is undone
+      // and a stray "Claude finished" toast/timer fires for a dead session.
+      if (!tabsRef.current.some((x) => x.id === t.id)) return;
       const delta = r?.messages || [];
       if (delta.length > 0) {
         setBusyById((b) => ({ ...b, [t.id]: true }));
@@ -593,7 +771,7 @@ export default function App() {
           const stillAway = t.id !== activeIdRef.current || !document.hasFocus();
           if (steps > 0 && stillAway && filtersRef.current.notifyOnFinish) {
             const tab = tabsRef.current.find((x) => x.id === t.id);
-            const name = tab?.title || (tab?.cwd || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "Session";
+            const name = tab ? tabDisplayName(tab) : "Session";
             toast(`◆ ${name}`, `Claude finished — ${steps} new step${steps > 1 ? "s" : ""}.`);
           }
         }, 2500);
@@ -611,7 +789,9 @@ export default function App() {
     } catch (e) {
       setError(String(e));
     } finally {
-      fetchingRef.current[t.id] = false;
+      // Don't re-add a flag for a tab that was closed mid-fetch.
+      if (tabsRef.current.some((x) => x.id === t.id)) fetchingRef.current[t.id] = false;
+      else delete fetchingRef.current[t.id];
     }
   }
   // Keep a live view of convos for `since` computation without re-subscribing.
@@ -644,6 +824,20 @@ export default function App() {
     activeIdRef.current = activeId;
     if (activeId) setNewById((n) => (n[activeId] ? { ...n, [activeId]: false } : n));
   }, [activeId]);
+
+  // Mission Control: poll the dashboard snapshot whenever sessions are open —
+  // it also powers the live signals ON the tabs themselves (in-memory on the
+  // backend, so 2s polling + change events is cheap).
+  useEffect(() => {
+    if (tabs.length === 0) return;
+    let alive = true;
+    let unlisten = null;
+    const pull = () => invoke("get_dashboard").then((d) => alive && setDash(d)).catch(() => {});
+    pull();
+    listen("syn2:changed", pull).then((u) => (unlisten = u));
+    const id = setInterval(pull, 2000);
+    return () => { alive = false; clearInterval(id); if (unlisten) unlisten(); };
+  }, [tabs.length > 0]);
 
   // Rate-limit windows (session 5h + weekly), cached by the statusline script
   // on every Claude refresh. Cheap file read; poll slowly + on changes.
@@ -717,19 +911,47 @@ export default function App() {
     window.addEventListener("mouseup", onUp);
   }
 
+  // Drag the rail divider to resize the left tab rail; persists across restarts.
+  function startRailDrag(e) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = railW;
+    let last = startW;
+    const onMove = (ev) => {
+      last = Math.max(150, Math.min(340, startW + (ev.clientX - startX)));
+      setRailW(last);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      saveRailW(last);
+      window.dispatchEvent(new Event("resize")); // let xterm re-fit
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
   function addTab(s, title) {
     tabCounter.current += 1;
     const id = "tab" + tabCounter.current;
-    setTabs((ts) => [...ts, {
-      id,
-      sessionId: s.sessionId,
-      root: s.root,
-      cwd: s.cwd,
-      command: s.command,
-      branch: s.branch,
-      title: title || null,
-      createdAt: Date.now(),
-    }]);
+    setTabs((ts) => {
+      // Same-folder sessions get a stable " · N" suffix; the number never
+      // shifts when an earlier sibling closes.
+      const key = normRoot(s.root || s.cwd);
+      const dupSeq =
+        Math.max(0, ...ts.filter((x) => normRoot(x.root || x.cwd) === key).map((x) => x.dupSeq || 1)) + 1;
+      return [...ts, {
+        id,
+        sessionId: s.sessionId,
+        root: s.root,
+        cwd: s.cwd,
+        command: s.command,
+        branch: s.branch,
+        title: title || null,
+        dupSeq,
+        createdAt: Date.now(),
+      }];
+    });
     setActiveId(id);
     setNewOpen(false);
     setBrowserOpen(false);
@@ -737,18 +959,34 @@ export default function App() {
 
   // Start a session → add a tab (never closes existing ones).
   async function start(opts) {
+    // A second non-worktree session in an already-occupied folder can stomp the
+    // first one's edits — nudge toward isolation (after starting; not a block).
+    const clash =
+      !opts.worktrees &&
+      tabsRef.current.some((t) => normRoot(t.root || t.cwd) === normRoot(opts.folder));
     const s = await invoke("start_session", { opts });
     setRecent(addRecentFolder(opts.folder));
     addTab(s, null);
+    // Isolation was requested but silently fell back to the real folder — warn.
+    setError(
+      s.worktreeError
+        ? `Worktree isolation couldn't be created (${s.worktreeError}); this session runs directly in the folder — edits are NOT sandboxed.`
+        : clash
+        ? "Heads up: another session is already running in this folder — parallel sessions can overwrite each other's edits. The worktree option isolates each session."
+        : ""
+    );
   }
 
-  // Resume an existing Claude Code session from the browser.
+  // Resume an existing Claude Code session from the browser. Autonomy is OFF by
+  // default — resuming to view/continue a session must not silently grant
+  // --dangerously-skip-permissions.
   async function resume(sessionMeta, title) {
     try {
+      setError("");
       const s = await invoke("resume_session", {
         sessionId: sessionMeta.sessionId,
         cwd: sessionMeta.cwd || "",
-        fullAutonomy: true,
+        fullAutonomy: false,
       });
       if (sessionMeta.cwd) setRecent(addRecentFolder(sessionMeta.cwd));
       addTab(s, title || sessionMeta.title || null);
@@ -758,22 +996,48 @@ export default function App() {
   }
 
   function removeTab(id) {
-    const idx = tabs.findIndex((t) => t.id === id);
-    const next = tabs.filter((t) => t.id !== id);
-    setTabs(next); // removing the tab unmounts its TerminalPane, which kills its PTY
+    // Cancel this tab's pending busy-timer and drop all per-id bookkeeping, so a
+    // closed tab can't fire a stray "Claude finished" toast and the maps/refs
+    // don't grow unbounded across open/close cycles.
+    clearTimeout(busyTimers.current[id]);
+    delete busyTimers.current[id];
+    delete bgWorkRef.current[id];
+    delete fetchingRef.current[id];
+    const prune = (setter) =>
+      setter((s) => { if (!(id in s)) return s; const n = { ...s }; delete n[id]; return n; });
     setConvos((c) => { const n = { ...c }; delete n[id]; return n; });
-    if (id === activeId) {
+    prune(setExpandById);
+    prune(setBusyById);
+    prune(setNewById);
+    prune(setShowAllTurns);
+    // Functional updates from current state (not a stale closure) so a tab opened
+    // concurrently with this close isn't dropped.
+    const cur = tabsRef.current;
+    const idx = cur.findIndex((t) => t.id === id);
+    setTabs((ts) => ts.filter((t) => t.id !== id)); // unmounts TerminalPane → kills its PTY
+    setActiveId((a) => {
+      if (a !== id) return a;
+      const next = cur.filter((t) => t.id !== id);
       const fb = next[idx] || next[idx - 1] || next[next.length - 1] || null;
-      setActiveId(fb ? fb.id : null);
-    }
+      return fb ? fb.id : null;
+    });
   }
 
   // Close = stop the tailer + (optionally) merge/delete the session worktree.
   async function confirmClose() {
     const t = tabs.find((x) => x.id === confirmCloseId);
     if (!t) { setConfirmCloseId(null); return; }
+    const worktreeAction = !!t.branch && closeAction !== "keep";
     setClosing(true);
     try {
+      // Kill the terminal / `claude` process FIRST (removeTab unmounts the pane,
+      // which calls term_close) so the worktree directory isn't locked and no file
+      // is mid-write when the backend merges/removes it.
+      removeTab(t.id);
+      setConfirmCloseId(null);
+      if (worktreeAction) {
+        await new Promise((r) => setTimeout(r, 250)); // let the PTY/handles release
+      }
       await invoke("close_session", {
         sessionId: t.sessionId,
         root: t.branch ? t.root : null,
@@ -781,11 +1045,12 @@ export default function App() {
         branch: t.branch || null,
         action: t.branch ? closeAction : "keep",
       });
-      removeTab(t.id);
-      setConfirmCloseId(null);
+      setError("");
       setCloseAction("keep");
     } catch (e) {
-      setError(String(e)); // e.g. merge conflict — session stays open to resolve it
+      // e.g. merge conflict — the backend rolls the merge back and preserves the
+      // work on the branch; surface the message so the user can resolve/resume.
+      setError(String(e));
     } finally {
       setClosing(false);
     }
@@ -850,7 +1115,29 @@ export default function App() {
 
   const turns = useMemo(() => groupTurns(messages), [messages]);
   const latestId = turns.length ? turns[turns.length - 1].id : null;
+  const latestTurn = turns.length ? turns[turns.length - 1] : null;
   const overrides = (activeTab && expandById[activeTab.id]) || {};
+
+  // Auto-collapse-on-send: when a brand-new turn appears in the tab you're
+  // looking at — i.e. you just sent a message — drop every manual expand/collapse
+  // override for that tab so the feed snaps back to "only the latest turn open".
+  // Tab switches and the first turns loading in never trigger it (we only fire
+  // when the active tab's latest turn id changes within the SAME tab), and a
+  // background-task notification doesn't count as something you sent. Off by
+  // default, so the feed otherwise keeps your manual choices exactly as before.
+  const prevLatestRef = useRef(null);
+  const prevActiveRef = useRef(null);
+  useEffect(() => {
+    const tabId = activeTab?.id || null;
+    const sameTab = prevActiveRef.current === tabId;
+    const prevLatest = prevLatestRef.current;
+    prevActiveRef.current = tabId;
+    prevLatestRef.current = latestId;
+    if (!sameTab || !tabId || !filters.autoCollapseOnSend) return;
+    if (prevLatest && latestId && prevLatest !== latestId && !latestTurn?.isNotif) {
+      setExpandById((s) => (s[tabId] ? { ...s, [tabId]: {} } : s));
+    }
+  }, [latestId, activeTab?.id, filters.autoCollapseOnSend]);
 
   const catById = useMemo(() => {
     const map = {};
@@ -911,16 +1198,21 @@ export default function App() {
   const feedRef = useRef(null);
   const stickRef = useRef(true);
   const [unstuck, setUnstuck] = useState(false);
-  useEffect(() => {
-    if (stickRef.current && feedRef.current) {
-      feedRef.current.scrollTop = feedRef.current.scrollHeight;
-    }
-  }, [messages.length, activeId]);
+  // NOTE: this reset MUST be declared before the auto-follow effect below.
+  // React runs effect setups in declaration order, so on a tab change the reset
+  // (stickRef=true) runs first, leaving the follow effect free to scroll the new
+  // tab to its live end. If it ran after, a previously scrolled-up tab would
+  // leave stickRef=false and the new tab would render parked mid-feed.
   useEffect(() => {
     // Switching tabs re-follows the live end.
     stickRef.current = true;
     setUnstuck(false);
   }, [activeId]);
+  useEffect(() => {
+    if (stickRef.current && feedRef.current) {
+      feedRef.current.scrollTop = feedRef.current.scrollHeight;
+    }
+  }, [messages.length, activeId]);
   function onFeedScroll() {
     const el = feedRef.current;
     if (!el) return;
@@ -966,6 +1258,7 @@ export default function App() {
     return (
       <div className={rootClass}>
         <Background mode={bgMode} color={bgColor} speed={filters.warpSpeed} light={effTheme === "light"} />
+        <UpdateBar />
         <Launch onStart={start} recent={recentList} onOpenSettings={() => openSettings("appearance")} onOpenBrowser={() => setBrowserOpen(true)} />
         {browserModal}
         {settingsModal}
@@ -978,7 +1271,7 @@ export default function App() {
 
   async function exportConversation(format) {
     try {
-      const base = (activeTab.title || (activeTab.cwd || "session").split(/[\\/]/).pop() || "session").replace(/[^\w.-]+/g, "-");
+      const base = (tabDisplayName(activeTab) || "session").replace(/[^\w.-]+/g, "-");
       const path = await save({
         title: "Export conversation",
         defaultPath: `${base}-${activeTab.sessionId.slice(0, 8)}.${format}`,
@@ -1017,12 +1310,23 @@ export default function App() {
     return !!last && last.kind === "toolcall" && !busyById[id];
   }
 
-  const tabBar = (
-    <div className={"tabbar " + tabPos}>
-      {tabs.map((t) => {
-        const name = t.title || (t.cwd || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop() || t.cwd;
-        const attn = tabAttention(t.id);
-        return (
+  // Fleet aggregates for the top-bar chip: how many sessions are running,
+  // streaming, waiting on the human, and how many subagents are live.
+  const fleetWorking = tabs.filter((t) => busyById[t.id]).length;
+  const fleetNeeds = tabs.filter((t) => tabAttention(t.id)).length;
+  const fleetAgents = tabs.reduce(
+    (a, t) => a + ((dash?.sessions?.[t.sessionId]?.stats?.agents || []).filter((x) => !x.done).length),
+    0
+  );
+
+  // One tab chip. In the grouped left rail the folder name lives on the group
+  // header, so the tab itself shows only its distinguishing bit.
+  const renderTab = (t, grouped) => {
+    const name = grouped ? t.title || `session ${t.dupSeq || 1}` : tabDisplayName(t);
+    // Always-on status indicator (same derivation as Mission Control).
+    const sess = dash?.sessions?.[t.sessionId];
+    const st = statusFor(sess?.stats, !!busyById[t.id], sess?.ready);
+    return (
           <div
             key={t.id}
             className={"tab" + (t.id === activeTab.id ? " active" : "")}
@@ -1035,12 +1339,17 @@ export default function App() {
             onDoubleClick={() => { setRenamingTab(t.id); setRenameVal(t.title || name); }}
             onContextMenu={(e) => { e.preventDefault(); setCtxMenu({ id: t.id, x: e.clientX, y: e.clientY }); }}
           >
-            {attn ? (
-              <span className="tab-dot attention" title="May be waiting for your approval in the terminal" />
+            <span className="tab-proj" style={{ background: projectColor(t.root || t.cwd) }} title={t.root || t.cwd} />
+            {st.key === "attention" ? (
+              <span className="tab-sig" title={st.hint}>
+                {{ toolcall: "⚠", question: "?", plan: "▤" }[sess?.stats?.lastKind] || "⚠"}
+              </span>
+            ) : st.key === "working" ? (
+              <span className="tab-dot working" title={st.hint} />
+            ) : t.id !== activeTab.id && newById[t.id] ? (
+              <span className="tab-dot" title="New activity" />
             ) : (
-              t.id !== activeTab.id && newById[t.id] && (
-                <span className={"tab-dot" + (busyById[t.id] ? " working" : "")} title={busyById[t.id] ? "Working…" : "New activity"} />
-              )
+              <span className="tab-dot idle" title={st.hint} />
             )}
             {renamingTab === t.id ? (
               <form className="tab-rename" onSubmit={(e) => { e.preventDefault(); commitTabRename(t); }}>
@@ -1059,7 +1368,34 @@ export default function App() {
             <button className="tab-x" onClick={(e) => { e.stopPropagation(); setCloseAction("keep"); setConfirmCloseId(t.id); }} title="Close session">✕</button>
           </div>
         );
-      })}
+  };
+
+  // Left rail groups tabs under one header per project folder; the top bar
+  // stays flat (horizontal space is too tight for headers).
+  const tabGroups = (() => {
+    const by = new Map();
+    for (const t of tabs) {
+      const key = normRoot(t.root || t.cwd);
+      if (!by.has(key)) by.set(key, { key, root: t.root || t.cwd, tabs: [] });
+      by.get(key).tabs.push(t);
+    }
+    return [...by.values()];
+  })();
+
+  const tabBar = (
+    <div className={"tabbar " + tabPos} style={tabPos === "left" ? { width: railW } : undefined}>
+      {tabPos === "left"
+        ? tabGroups.map((g) => (
+            <div key={g.key} className="tabgroup">
+              <div className="tabgroup-head" title={g.root}>
+                <span className="proj-dot" style={{ background: projectColor(g.root) }} />
+                <span className="tabgroup-name">{baseNameOf(g.root)}</span>
+                {g.tabs.length > 1 && <span className="tabgroup-count">{g.tabs.length}</span>}
+              </div>
+              {g.tabs.map((t) => renderTab(t, true))}
+            </div>
+          ))
+        : tabs.map((t) => renderTab(t, false))}
       <button className="tab-new" onClick={() => setNewOpen(true)} title="New session">＋</button>
       <button className="tab-new" onClick={() => setBrowserOpen(true)} title="Resume a previous session">⧉</button>
     </div>
@@ -1069,9 +1405,13 @@ export default function App() {
     <div className={rootClass}>
       <Background mode={bgMode} color={bgColor} speed={filters.warpSpeed} light={effTheme === "light"} />
       <div className="app">
+        <UpdateBar />
         <header className="topbar">
           <div className="logo"><span className="logo-mark">◆</span> Synapse 2</div>
-          <div className="session-info" title={activeTab.cwd}>{activeTab.cwd}{activeTab.branch ? ` · ⌥ ${activeTab.branch}` : ""}</div>
+          <div className="session-info" title={activeTab.cwd}>
+            <span className="proj-dot" style={{ background: projectColor(activeTab.root || activeTab.cwd) }} />
+            {activeTab.cwd}{activeTab.branch ? ` · ⌥ ${activeTab.branch}` : ""}
+          </div>
           {usage && (usage.input > 0 || usage.output > 0) && (
             <div
               className="usage-chip"
@@ -1082,6 +1422,16 @@ export default function App() {
           )}
           <LimitChip icon="⏱" label="session" win={rateLimits?.rateLimits?.five_hour} />
           <LimitChip icon="📅" label="week" win={rateLimits?.rateLimits?.seven_day} />
+          <button
+            className="usage-chip fleet-chip"
+            onClick={() => setDashOpen(true)}
+            title={`Fleet: ${tabs.length} session(s) · ${fleetWorking} working · ${fleetNeeds} needing you · ${fleetAgents} subagent(s) live\nClick for Mission Control (Ctrl+Shift+B)`}
+          >
+            <span className="fleet-seg">▦ {tabs.length}</span>
+            <span className={"fleet-seg" + (fleetWorking ? " ok" : " dim")}>● {fleetWorking} working</span>
+            <span className={"fleet-seg" + (fleetNeeds ? " warn" : " dim")}>⚠ {fleetNeeds} need you</span>
+            <span className={"fleet-seg" + (fleetAgents ? " ok" : " dim")}>⑂ {fleetAgents} agents</span>
+          </button>
           <div className="run-state">
             {tabAttention(activeTab.id) && !busy && (
               <span className="attn-hint" title="The last activity was a tool call with no result yet — Claude may be waiting for you in the terminal">⚠ waiting?</span>
@@ -1093,7 +1443,12 @@ export default function App() {
         </header>
         {tabPos === "top" && tabBar}
         <div className="app-row">
-          {tabPos === "left" && tabBar}
+          {tabPos === "left" && (
+            <>
+              {tabBar}
+              <div className="rail-divider" onMouseDown={startRailDrag} title="Drag to resize" />
+            </>
+          )}
           <div className="cols" ref={colsRef} style={{ gridTemplateColumns: `${split}% 6px minmax(0, 1fr)` }}>
             <section className="term-col">
               {tabs.map((t) => (
@@ -1162,7 +1517,7 @@ export default function App() {
                   ↓ latest
                 </button>
               )}
-              {error && <div className="error">{error}</div>}
+              {error && <div className="error" role="button" title="Dismiss" onClick={() => setError("")}>{error} <span className="error-x">✕</span></div>}
             </section>
           </div>
         </div>
@@ -1170,7 +1525,7 @@ export default function App() {
       {ctxMenu && (() => {
         const t = tabs.find((x) => x.id === ctxMenu.id);
         if (!t) return null;
-        const name = t.title || (t.cwd || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop() || t.cwd;
+        const name = tabDisplayName(t);
         return (
           <div
             className="ctx-overlay"
@@ -1205,7 +1560,7 @@ export default function App() {
             <div className="confirm-title">Close session?</div>
             <div className="confirm-body">
               This ends the Claude session in{" "}
-              <b>{(confirmTab.cwd || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop() || confirmTab.cwd}</b>{" "}
+              <b>{tabDisplayName(confirmTab)}</b>{" "}
               and closes its terminal.
             </div>
             {confirmTab.branch && (
@@ -1227,6 +1582,16 @@ export default function App() {
       )}
       {browserModal}
       {settingsModal}
+      {dashOpen && (
+        <Dashboard
+          tabs={tabs}
+          dash={dash}
+          busyById={busyById}
+          rateLimits={rateLimits}
+          onJump={(id) => { setActiveId(id); setDashOpen(false); }}
+          onClose={() => setDashOpen(false)}
+        />
+      )}
       {hotkeysOpen && <HotkeySheet onClose={() => setHotkeysOpen(false)} />}
       {whatsNew && <WhatsNew version={whatsNew} onClose={() => setWhatsNew(null)} />}
     </div>

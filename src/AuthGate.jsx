@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { checkForUpdates } from "./updater.js";
+import { initUpdater } from "./updater.js";
 
 // Synapse is a HyperVoice Suite app: it gates on the user's HyperVoice account
 // having suite access (Pro / Lifetime). This wraps the whole app — children only
@@ -50,19 +50,32 @@ export default function AuthGate({ children }) {
     setPhase((p) => (p === "ok" ? "ok" : "checking"));
     try {
       const e = await invoke("get_entitlement");
-      setOffline(false);
       if (!e || e.linked === false) {
+        setOffline(false);
         setPhase("signin");
         return;
       }
-      setEnt(e);
       if (e.suite_access) {
+        setOffline(false);
+        setEnt(e);
         writeCache(e);
         setWaiting(false);
         setPhase("ok");
-      } else {
-        setPhase("free");
+        return;
       }
+      // suite_access is false. Only an AUTHORITATIVE response (clean 200 with a
+      // parsed JSON body) may downgrade the user to the upsell wall. A 5xx, a
+      // captive-portal HTML page, or any unparsed/unexpected body is treated as
+      // "unknown" — falling through to the cached-entitlement path below so a
+      // transient HyperVoice outage can't lock a paying customer out of an app
+      // they already own.
+      if (e.http_status === 200 && e.parsed) {
+        setOffline(false);
+        setEnt(e);
+        setPhase("free");
+        return;
+      }
+      throw new Error(`indeterminate entitlement (status ${e.http_status})`);
     } catch {
       // Network/back-end unreachable — fall back to a recent cached "ok".
       const cached = readCache();
@@ -105,12 +118,14 @@ export default function AuthGate({ children }) {
     return () => window.removeEventListener("focus", onFocus);
   }, [phase, evaluate]);
 
-  // Kick the updater once on mount, regardless of auth state — so a build that
-  // can't get past the gate (e.g. a sign-in bug) can still self-heal via update.
+  // Mirror the persisted "skip this version" choice into Rust once on mount,
+  // regardless of auth state — the Rust-side checker (which runs even if a
+  // sign-in bug blocks the gate, so a broken build can still self-heal via
+  // update) waits a few seconds for exactly this.
   useEffect(() => {
     if (!checkedUpdates.current) {
       checkedUpdates.current = true;
-      checkForUpdates();
+      initUpdater();
     }
   }, []);
 

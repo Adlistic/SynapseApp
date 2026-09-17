@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-09-17
+
+### Added
+- **Mission Control dashboard** — press Ctrl+Shift+B (or click the fleet chip
+  in the topbar) for a live view over every open session: status lights,
+  current activity, Claude's own todo plan with progress, running subagents,
+  a context-window gauge, token/cost counters, tool-mix bars, and a
+  15-minute activity sparkline per session.
+- **Fleet chip in the topbar** — sessions · working · need-you · live agents,
+  always visible; click it to open Mission Control.
+- **Per-tab status indicators** — every tab now shows a status at a glance:
+  pulsing green while working, amber ⚠ / ? / ▤ when Claude is waiting for an
+  approval, an answer, or a plan review, dim when idle.
+- **Project grouping** — sessions in the same folder get stable numbered
+  names ("MyApp · 2"), a shared identity color on tabs and dashboard cards,
+  grouped dashboard sections with per-project rollups, and grouped headers in
+  the left tab rail.
+- **Resizable left tab rail** — drag its edge; the width persists. The app
+  window's size and position now persist across restarts too.
+- **Background auto-updates** — updates now check every 6 hours and download
+  silently in the background (signature-verified); a slim bar offers
+  "Restart to update" when one is ready. Nothing installs until you say so,
+  so a running Claude turn is never interrupted. Skip a version and the next
+  release re-offers automatically.
+
+### Fixed
+- **Background color swatches** — the Settings chips for the aurora/color
+  background were all rendering as near-black dots in dark mode; they now
+  show their actual hues.
+- **Header chip legibility** — the token and session/week chips use
+  full-brightness text in dark mode.
+- **Embedded sessions always save transcripts** — terminals now strip
+  inherited Claude Code child-session markers, so the conversation pane can
+  never come up permanently empty when Synapse itself was launched from a
+  Claude Code session.
+
 ## [0.2.1] — 2026-06-12
 
 ### Added

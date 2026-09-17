@@ -10,8 +10,12 @@ const components = {
     <a
       href={href}
       onClick={(e) => {
+        // ALWAYS suppress the WebView's default navigation: an untrusted
+        // transcript link like `//evil.example` or `/x` would otherwise navigate
+        // the whole app frame away (remote phishing page / SPA-unmounting DoS).
+        // Only genuine http(s) links are forwarded to the system browser.
+        e.preventDefault();
         if (href && /^https?:\/\//i.test(href)) {
-          e.preventDefault();
           invoke("open_external", { url: href }).catch(() => {});
         }
       }}

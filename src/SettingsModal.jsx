@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { TOOL_CATS, BG_PRESETS, ACCENT_PRESETS, KIND_COLOR } from "./filters.js";
-import { checkForUpdatesManual } from "./updater.js";
+import { useUpdateStatus, checkForUpdates, installUpdate, getUpdateCheckInfo, describeAgo } from "./updater.js";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -250,12 +250,22 @@ function StatuslineRow() {
 
 function About() {
   const [version, setVersion] = useState("");
-  const [state, setState] = useState(null);
+  const st = useUpdateStatus();
+  // Last-check info refreshes with each status change so "checked just now"
+  // appears right after the button is clicked.
+  const [info, setInfo] = useState(null);
   useEffect(() => { getVersion().then(setVersion).catch(() => {}); }, []);
-  async function run() {
-    setState("checking");
-    setState(await checkForUpdatesManual());
-  }
+  useEffect(() => { getUpdateCheckInfo().then(setInfo).catch(() => {}); }, [st]);
+  const checked = info?.last_check_at ? `Last checked ${describeAgo(info.last_check_at)}.` : "";
+  const hint =
+    st.status === "checking" ? "Checking…"
+    : st.status === "downloading" ? `Downloading v${st.version} in the background — ${st.progress}%`
+    : st.status === "ready" ? `v${st.version} is downloaded and verified — restart to install`
+    : st.status === "installing" ? `Installing v${st.version}…`
+    : st.status === "error" ? `Couldn't check: ${st.message}`
+    : st.status === "up-to-date" ? `✓ You're on the latest version. ${checked}`
+    : `Checks automatically every 6 hours; updates download in the background. ${checked}`;
+  const busy = st.status === "checking" || st.status === "downloading" || st.status === "installing";
   return (
     <>
       <Item
@@ -265,19 +275,21 @@ function About() {
       />
       <Item
         label="Updates"
-        hint={
-          state && state !== "checking"
-            ? state.status === "uptodate"
-              ? "✓ You're on the latest version"
-              : state.status === "installing"
-              ? `Updating to ${state.version}…`
-              : `Couldn't check: ${state.message}`
-            : "Installed updates apply on relaunch"
-        }
+        hint={hint}
         control={
-          <button className="sm-btn" onClick={run} disabled={state === "checking"}>
-            {state === "checking" ? "Checking…" : "Check for updates"}
-          </button>
+          st.status === "ready" ? (
+            <button
+              className="sm-btn"
+              onClick={() => installUpdate().catch(() => {})}
+              title="Installs and relaunches — finish any running Claude turn first"
+            >
+              Restart to update
+            </button>
+          ) : (
+            <button className="sm-btn" onClick={() => checkForUpdates(true).catch(() => {})} disabled={busy}>
+              {busy ? "Working…" : "Check for updates"}
+            </button>
+          )
         }
       />
       <Item
@@ -316,7 +328,7 @@ export default function SettingsModal({ open, onClose, filters, setFlag, setCat,
   // Which nav sections contain a match (used to filter the rail while searching).
   const sectionHits = useMemo(() => ({
     appearance: hit("theme dark light system accent color background aurora speed"),
-    conversation: hit(CONVO.concat(RESULTS).map((r) => r.label + " " + r.hint).join(" ")),
+    conversation: hit(CONVO.concat(RESULTS).map((r) => r.label + " " + r.hint).join(" ") + " feed behavior auto collapse on send message latest turn"),
     tools: hit("tool calls categories filtered display dot pill hidden " + TOOL_CATS.map((c) => c.label).join(" ")),
     workspace: hit("recent folders launch tabs position composer terminal dictation prompt notifications toast usage limits statusline"),
     about: hit("version updates check data local"),
@@ -333,8 +345,14 @@ export default function SettingsModal({ open, onClose, filters, setFlag, setCat,
     (filters.theme || "dark") === "light" ||
     ((filters.theme || "dark") === "system" &&
       window.matchMedia("(prefers-color-scheme: light)").matches);
+  // Dark-mode chips are hue labels, not literal previews: the stored tones sit
+  // at 8–14% lightness, which renders every 26px chip as the same black dot.
   const swatchCss = (p) =>
-    isLight ? `hsl(${p.h} ${Math.min(p.s, 45)}% 91%)` : `hsl(${p.h} ${p.s}% ${p.l}%)`;
+    isLight
+      ? `hsl(${p.h} ${Math.min(p.s, 45)}% 91%)`
+      : p.s === 0
+      ? "hsl(0 0% 24%)"
+      : `hsl(${p.h} ${Math.max(p.s, 50)}% 40%)`;
 
   return (
     <div className="modal-backdrop sm-backdrop" onClick={onClose}>
@@ -466,6 +484,15 @@ export default function SettingsModal({ open, onClose, filters, setFlag, setCat,
                   {RESULTS.filter((r) => hit(r.label, r.hint)).map((r) => (
                     <ToggleItem key={r.key} color={r.color} label={r.label} hint={r.hint} checked={!!filters[r.key]} onChange={(v) => setFlag(r.key, v)} />
                   ))}
+                </Group>
+                <Group title="Feed behavior" desc="How the conversation reacts as you work." visible={hit("feed behavior auto collapse on send message latest turn")}>
+                  <ToggleItem
+                    color={KIND_COLOR.user}
+                    label="Collapse others when you send"
+                    hint="Each time you send a message to the terminal, collapse every turn and expand only the one you just sent. Off keeps your manual expand/collapse choices."
+                    checked={!!filters.autoCollapseOnSend}
+                    onChange={(v) => setFlag("autoCollapseOnSend", v)}
+                  />
                 </Group>
               </>
             )}

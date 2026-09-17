@@ -1,6 +1,6 @@
 [package]
 name = "synapse2-desktop"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Synapse — Claude Code Workspace"
 authors = ["Chris Cousens"]
@@ -34,6 +34,10 @@ uuid = { version = "1", features = ["v4"] }
 # self-contained — no build-time dependency on the private Adlistic/Synapse repo.
 synapse-core = { path = "../synapse-core" }
 tauri-plugin-notification = "2"
+# Persists window size/position/maximized state across restarts.
+tauri-plugin-window-state = "2"
+# The app-owned updater's periodic check loop (updater.rs) sleeps on tokio time.
+tokio = { version = "1", features = ["time"] }
 
 [profile.release]
 opt-level = "s"

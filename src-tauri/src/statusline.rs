@@ -124,14 +124,20 @@ pub fn install_statusline_hook() -> Result<Value, String> {
     }
     std::fs::write(&hook, HOOK_SCRIPT).map_err(|e| e.to_string())?;
 
-    // Merge into ~/.claude/settings.json, preserving everything else.
+    // Merge into ~/.claude/settings.json, preserving everything else. If the file
+    // exists but is unparseable, ABORT rather than fall back to `{}` — otherwise we
+    // would silently overwrite the user's whole settings (permissions, MCP servers,
+    // hooks) with just our statusLine key.
     let settings_path = claude_settings_path();
-    let mut settings: Value = std::fs::read_to_string(&settings_path)
-        .ok()
-        .and_then(|b| serde_json::from_str(&b).ok())
-        .unwrap_or_else(|| json!({}));
+    let mut settings: Value = match std::fs::read_to_string(&settings_path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| {
+            format!("~/.claude/settings.json isn't valid JSON ({e}); fix or remove it, then retry. Refusing to overwrite it.")
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(e) => return Err(format!("couldn't read ~/.claude/settings.json: {e}")),
+    };
     if !settings.is_object() {
-        settings = json!({});
+        return Err("~/.claude/settings.json isn't a JSON object; refusing to overwrite it.".into());
     }
     let cmd = format!("node \"{}\"", hook.to_string_lossy());
     settings["statusLine"] = json!({ "type": "command", "command": cmd });

@@ -6,14 +6,16 @@
 //! normal interactive shell — the feed is built from the transcript, not by
 //! scraping the terminal.
 
+mod dashboard;
 mod hv_auth;
 mod sessions;
 mod statusline;
 mod terminals;
+mod updater;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,10 +46,13 @@ struct SessionTail {
     path: Option<PathBuf>,
     /// Bytes consumed so far (always ends on a line boundary).
     offset: u64,
-    /// Carry-over of a trailing partial line awaiting its newline.
-    partial: String,
+    /// Carry-over of trailing bytes after the last newline (raw bytes, so a
+    /// multibyte char split across a read boundary is never decoded early).
+    partial: Vec<u8>,
     messages: Vec<Message>,
     usage: Usage,
+    /// Rich per-session metrics for the Mission Control dashboard.
+    stats: dashboard::DashStats,
     line_no: i64,
     /// Flipped false by `close_session`; the tailer thread exits on it.
     alive: bool,
@@ -57,6 +62,16 @@ type Tails = Arc<Mutex<HashMap<String, SessionTail>>>;
 
 struct AppState {
     tails: Tails,
+    /// Canonical paths of worktrees backing a currently-open session; the orphan
+    /// cleaner must never force-remove these.
+    active_worktrees: Arc<Mutex<HashSet<PathBuf>>>,
+    /// App-owned updater state (see updater.rs).
+    update: Mutex<updater::UpdateSlot>,
+}
+
+/// Best-effort canonical form for comparing worktree paths across commands.
+fn norm_path(p: &std::path::Path) -> PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// Consume any newly appended complete lines from the transcript. Returns true
@@ -74,30 +89,41 @@ fn drain_tail(tail: &mut SessionTail) -> bool {
     if f.seek(SeekFrom::Start(tail.offset)).is_err() {
         return false;
     }
-    let mut buf = Vec::with_capacity((len - tail.offset) as usize);
-    if f.read_to_end(&mut buf).is_err() {
+    // Read at most a bounded chunk per pass so resuming a huge transcript doesn't
+    // allocate the whole file at once (it just catches up over a few ticks).
+    let to_read = (len - tail.offset).min(8 * 1024 * 1024);
+    let mut buf = Vec::with_capacity(to_read as usize);
+    if f.take(to_read).read_to_end(&mut buf).is_err() {
         return false;
     }
     tail.offset += buf.len() as u64;
-    let chunk = String::from_utf8_lossy(&buf);
-    let text = format!("{}{}", tail.partial, chunk);
-    // Only parse complete lines; keep any trailing partial for the next pass.
-    let (complete, partial) = match text.rfind('\n') {
-        Some(i) => (text[..i].to_string(), text[i + 1..].to_string()),
-        None => (String::new(), text),
+    // Carry the trailing partial as raw BYTES, not a lossy String: a multibyte
+    // char split across a read boundary must not be decoded until all its bytes
+    // are present, or it corrupts into U+FFFD (and can desync the next read).
+    let mut bytes = std::mem::take(&mut tail.partial);
+    bytes.extend_from_slice(&buf);
+    let complete_bytes = match bytes.iter().rposition(|&b| b == b'\n') {
+        Some(nl) => {
+            tail.partial = bytes.split_off(nl + 1); // after the last '\n'
+            bytes // up to & including the last '\n' = only whole lines
+        }
+        None => {
+            tail.partial = bytes; // no complete line yet
+            return false;
+        }
     };
-    tail.partial = partial;
+    // Safe to decode now: complete lines fully contain any multibyte char (a '\n'
+    // byte, 0x0A, can never be part of one).
+    let complete = String::from_utf8_lossy(&complete_bytes);
     let mut added = false;
     for line in complete.lines() {
         if line.trim().is_empty() {
             continue;
         }
         tail.line_no += 1;
-        for m in parse_line(line, tail.line_no, None) {
-            tail.messages.push(m);
-            added = true;
-        }
-        // Token usage rides on the raw entry, which parse_line doesn't surface.
+        let msgs = parse_line(line, tail.line_no, None);
+        // Token usage + dashboard stats ride on the raw entry, which parse_line
+        // doesn't surface.
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
             if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
                 let g = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
@@ -106,6 +132,11 @@ fn drain_tail(tail: &mut SessionTail) -> bool {
                 tail.usage.cache_read += g("cache_read_input_tokens");
                 tail.usage.cache_creation += g("cache_creation_input_tokens");
             }
+            dashboard::update_stats(&mut tail.stats, &v, &msgs);
+        }
+        for m in msgs {
+            tail.messages.push(m);
+            added = true;
         }
     }
     added
@@ -117,25 +148,51 @@ fn drain_tail(tail: &mut SessionTail) -> bool {
 fn spawn_tailer(app: tauri::AppHandle, tails: Tails, session_id: String) {
     {
         let mut map = tails.lock();
-        if map.contains_key(&session_id) {
-            return; // already tailing
+        match map.get(&session_id) {
+            Some(t) if t.alive => return, // already tailing
+            // A dead entry from a just-closed session may not be reaped yet;
+            // replace it so a quick close→resume of the same id still gets a
+            // live tailer instead of inheriting a soon-to-be-removed one.
+            _ => {
+                map.insert(session_id.clone(), SessionTail { alive: true, ..Default::default() });
+            }
         }
-        map.insert(session_id.clone(), SessionTail { alive: true, ..Default::default() });
     }
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(std::time::Duration::from_millis(400));
-            let mut map = tails.lock();
-            let Some(tail) = map.get_mut(&session_id) else { return };
-            if !tail.alive {
-                map.remove(&session_id);
-                return;
+            // Resolve the transcript path OFF the lock (find_transcript scans a
+            // directory) so we never hold the global lock during that I/O.
+            let need_path = {
+                let map = tails.lock();
+                match map.get(&session_id) {
+                    None => return,
+                    Some(t) => t.alive && t.path.is_none(),
+                }
+            };
+            if need_path {
+                let found = find_transcript(&session_id);
+                let mut map = tails.lock();
+                match map.get_mut(&session_id) {
+                    Some(t) if t.alive => t.path = found,
+                    _ => {
+                        map.remove(&session_id);
+                        return;
+                    }
+                }
             }
-            if tail.path.is_none() {
-                tail.path = find_transcript(&session_id);
-            }
-            let added = drain_tail(tail);
-            drop(map);
+            let added = {
+                let mut map = tails.lock();
+                let Some(tail) = map.get_mut(&session_id) else { return };
+                if !tail.alive {
+                    map.remove(&session_id);
+                    return;
+                }
+                // A malformed/unexpected line must never panic the tailer thread —
+                // that would silently freeze this session's feed. Catch and skip.
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drain_tail(tail)))
+                    .unwrap_or(false)
+            };
             if added {
                 let _ = app.emit("syn2:changed", serde_json::json!({ "sessionId": session_id }));
             }
@@ -196,6 +253,10 @@ fn start_session(
     }
 
     let mut branch: Option<String> = None;
+    // When worktree isolation is requested but can't be created, we fall back to
+    // the real folder — but we tell the frontend so it can warn instead of letting
+    // the user believe edits are sandboxed.
+    let mut worktree_error: Option<String> = None;
     if opts.worktrees {
         let wm = WorktreeManager::new(cwd.clone());
         if wm.is_git_repo() {
@@ -209,13 +270,17 @@ fn start_session(
             match wm.add(&b, &wt, None) {
                 Ok(p) => {
                     info!(target: "synapse2", branch = %b, path = %p.display(), "created worktree");
+                    state.active_worktrees.lock().insert(norm_path(&p));
                     cwd = p;
                     branch = Some(b);
                 }
                 Err(e) => {
                     info!(target: "synapse2", error = %e, "worktree failed; using the folder directly");
+                    worktree_error = Some(e.to_string());
                 }
             }
+        } else {
+            worktree_error = Some("the chosen folder isn't a git repository".into());
         }
     }
 
@@ -233,6 +298,7 @@ fn start_session(
         "cwd": cwd.to_string_lossy(),
         "command": command,
         "branch": branch,
+        "worktreeError": worktree_error,
     }))
 }
 
@@ -285,13 +351,37 @@ fn get_conversation(state: State<AppState>, session_id: String, since: Option<us
     })
 }
 
+/// One snapshot of every open session's dashboard stats — all served from the
+/// tailer's in-memory cache, so this is safe to poll frequently.
+#[tauri::command]
+fn get_dashboard(state: State<AppState>) -> serde_json::Value {
+    let map = state.tails.lock();
+    let mut sessions = serde_json::Map::new();
+    for (id, t) in map.iter() {
+        sessions.insert(
+            id.clone(),
+            serde_json::json!({
+                "ready": t.path.is_some(),
+                "usage": t.usage,
+                "stats": t.stats,
+            }),
+        );
+    }
+    serde_json::json!({ "sessions": sessions })
+}
+
 /// End a session: stop its tailer and (optionally) deal with its worktree.
 /// `action`: "keep" leaves everything; "delete" removes the worktree + branch;
 /// "merge" commits any leftover work in the worktree, merges the branch into
 /// the root tree, then removes the worktree + branch.
+///
+/// `async` so the blocking git sequence (merge can take seconds) and the
+/// worktree-remove retry loop (up to ~1s of sleeps) run on the async runtime
+/// instead of the main/UI thread — otherwise the whole window freezes while a
+/// session with a worktree is being closed.
 #[tauri::command]
-fn close_session(
-    state: State<AppState>,
+async fn close_session(
+    state: State<'_, AppState>,
     session_id: String,
     root: Option<String>,
     worktree_path: Option<String>,
@@ -306,16 +396,23 @@ fn close_session(
         }
     };
     let action = action.unwrap_or_else(|| "keep".into());
+    // Only recognized actions are allowed — never let an unknown/typo'd value fall
+    // through to the destructive "remove worktree + delete branch" cleanup.
+    if !matches!(action.as_str(), "keep" | "merge" | "delete") {
+        return Err(format!("unknown close action: {action}"));
+    }
     let (Some(root), Some(wt), Some(branch)) = (root, worktree_path, branch) else {
         stop_tailer(&state);
         return Ok(());
     };
+    let root = PathBuf::from(root);
+    let wt = PathBuf::from(wt);
+    // This worktree is no longer backing a live session (whatever the action).
+    state.active_worktrees.lock().remove(&norm_path(&wt));
     if action == "keep" {
         stop_tailer(&state);
         return Ok(());
     }
-    let root = PathBuf::from(root);
-    let wt = PathBuf::from(wt);
     if action == "merge" {
         // Commit whatever the session left uncommitted so the merge sees it.
         let dirty = git(&wt, &["status", "--porcelain"])?;
@@ -330,13 +427,31 @@ fn close_session(
         // Merge only if the branch actually has commits beyond the root HEAD.
         let ahead = git(&root, &["rev-list", "--count", &format!("HEAD..{branch}")])?;
         if ahead.trim() != "0" {
-            git(&root, &["merge", "--no-edit", &branch])?;
+            if let Err(e) = git(&root, &["merge", "--no-edit", &branch]) {
+                // Roll the root tree back so we never leave the user's MAIN folder
+                // stuck mid-merge with conflict markers. The branch + worktree stay
+                // intact, so the session's work is preserved and still resumable.
+                let _ = git(&root, &["merge", "--abort"]);
+                return Err(format!(
+                    "Couldn't merge {branch} into the main folder ({e}). The merge was rolled back; your session work is still on branch {branch} — resolve it manually or reopen the session."
+                ));
+            }
             info!(target: "synapse2", branch = %branch, "merged session branch");
         }
     }
-    // For both "merge" and "delete": clean up the worktree + branch.
+    // For both "merge" and "delete": clean up the worktree + branch. Retry the
+    // removal briefly — just after the session's terminal is killed the OS may
+    // still hold the worktree directory for a moment (Windows sharing violation).
     let wt_str = wt.to_string_lossy().to_string();
-    git(&root, &["worktree", "remove", "--force", &wt_str])?;
+    let mut removed = git(&root, &["worktree", "remove", "--force", &wt_str]);
+    for _ in 0..5 {
+        if removed.is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        removed = git(&root, &["worktree", "remove", "--force", &wt_str]);
+    }
+    removed?;
     let _ = git(&root, &["branch", "-D", &branch]); // may fail if never created
     info!(target: "synapse2", branch = %branch, action = %action, "worktree cleaned up");
     stop_tailer(&state);
@@ -344,13 +459,16 @@ fn close_session(
 }
 
 /// Worktrees under `<folder>/.synapse2/worktrees` left behind by old sessions.
+/// Excludes any worktree currently backing an open session.
 #[tauri::command]
-fn list_orphan_worktrees(folder: String) -> Vec<serde_json::Value> {
+fn list_orphan_worktrees(state: State<AppState>, folder: String) -> Vec<serde_json::Value> {
     let dir = PathBuf::from(folder.trim()).join(".synapse2").join("worktrees");
     let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let active = state.active_worktrees.lock().clone();
     entries
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_dir())
+        .filter(|e| !active.contains(&norm_path(&e.path())))
         .map(|e| {
             serde_json::json!({
                 "path": e.path().to_string_lossy(),
@@ -360,15 +478,21 @@ fn list_orphan_worktrees(folder: String) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Remove ALL leftover session worktrees under `<folder>/.synapse2/worktrees`
-/// (and their `synapse2/<name>` branches). Returns how many were removed.
+/// Remove leftover session worktrees under `<folder>/.synapse2/worktrees` (and
+/// their `synapse2/<name>` branches) — SKIPPING any worktree that is currently
+/// backing an open session (removing those would destroy in-progress work).
+/// Returns how many were removed.
 #[tauri::command]
-fn cleanup_orphan_worktrees(folder: String) -> Result<usize, String> {
+fn cleanup_orphan_worktrees(state: State<AppState>, folder: String) -> Result<usize, String> {
     let root = PathBuf::from(folder.trim());
     let dir = root.join(".synapse2").join("worktrees");
     let Ok(entries) = std::fs::read_dir(&dir) else { return Ok(0) };
+    let active = state.active_worktrees.lock().clone();
     let mut removed = 0usize;
     for e in entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+        if active.contains(&norm_path(&e.path())) {
+            continue; // belongs to an open session — never force-remove it
+        }
         let name = e.file_name().to_string_lossy().to_string();
         let p = e.path().to_string_lossy().to_string();
         if git(&root, &["worktree", "remove", "--force", &p]).is_ok() {
@@ -426,13 +550,21 @@ fn get_rate_limits() -> serde_json::Value {
 /// Delete one session transcript from Claude Code's store (the browser's 🗑).
 /// Restricted to paths inside `~/.claude/projects`.
 #[tauri::command]
-fn delete_claude_session(path: String) -> Result<(), String> {
+fn delete_claude_session(state: State<AppState>, path: String) -> Result<(), String> {
     let p = PathBuf::from(path.trim());
     let root = claude_projects_dir().ok_or("no Claude session store")?;
     let canon = p.canonicalize().map_err(|e| format!("session not found: {e}"))?;
     let canon_root = root.canonicalize().map_err(|e| e.to_string())?;
     if !canon.starts_with(&canon_root) {
         return Err("path is outside the Claude session store".into());
+    }
+    // Refuse to delete a transcript that's open & live in a tab: its `claude`
+    // process is still writing to that file, so deleting it would freeze the feed
+    // and destroy in-progress work. The file stem is the session id (the tails key).
+    if let Some(stem) = canon.file_stem().and_then(|s| s.to_str()) {
+        if state.tails.lock().get(stem).map(|t| t.alive).unwrap_or(false) {
+            return Err("That session is open in a tab — close it before deleting.".into());
+        }
     }
     std::fs::remove_file(&canon).map_err(|e| e.to_string())?;
     info!(target: "synapse2", path = %canon.display(), "transcript deleted");
@@ -463,10 +595,25 @@ fn open_external(url: String) -> Result<(), String> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("only http(s) links can be opened".into());
     }
+    // The URL comes from rendered (untrusted) transcript markdown. Reject anything
+    // that isn't a clean single-token URL: raw whitespace/control chars and shell
+    // metacharacters are the ingredients of argument-splitting / command injection.
+    if url.len() > 2048
+        || url.chars().any(|c| {
+            c.is_whitespace()
+                || c.is_control()
+                || matches!(c, '"' | '\'' | '&' | '|' | '^' | '<' | '>' | '`' | '(' | ')')
+        })
+    {
+        return Err("refusing to open a malformed URL".into());
+    }
     #[cfg(windows)]
     let r = {
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/C", "start", "", &url]);
+        // Do NOT go through `cmd /C start` — cmd interprets & | ^ etc. BEFORE the
+        // target sees them, which turned this into a command-injection sink. rundll32
+        // receives the URL as a single, non-shell-parsed argument.
+        let mut c = std::process::Command::new("rundll32.exe");
+        c.arg("url.dll,FileProtocolHandler").arg(&url);
         synapse_core::runner::hide_window(&mut c);
         c.spawn()
     };
@@ -483,6 +630,8 @@ pub fn run() {
 
     let state = AppState {
         tails: Arc::new(Mutex::new(HashMap::new())),
+        active_worktrees: Arc::new(Mutex::new(HashSet::new())),
+        update: Mutex::new(updater::UpdateSlot::default()),
     };
 
     tauri::Builder::default()
@@ -503,6 +652,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
@@ -528,6 +678,8 @@ pub fn run() {
             {
                 let _ = app.deep_link().register_all();
             }
+            // Rust-owned background updater: launch check + 6-hourly re-checks.
+            updater::start(app.handle());
             // Cold start via deep link (Windows): the URL is in our own argv.
             for arg in std::env::args() {
                 if arg.starts_with("synapse://") {
@@ -542,6 +694,7 @@ pub fn run() {
             start_session,
             resume_session,
             get_conversation,
+            get_dashboard,
             close_session,
             list_orphan_worktrees,
             cleanup_orphan_worktrees,
@@ -562,7 +715,13 @@ pub fn run() {
             terminals::term_open,
             terminals::term_input,
             terminals::term_resize,
-            terminals::term_close
+            terminals::term_close,
+            updater::get_update_status,
+            updater::get_update_check_info,
+            updater::check_for_updates,
+            updater::install_update,
+            updater::dismiss_update,
+            updater::sync_dismissed_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running Synapse");

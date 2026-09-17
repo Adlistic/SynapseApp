@@ -64,6 +64,15 @@ pub fn term_open(
     // inside Synapse, so an env-aware status line can hide itself here while
     // staying visible in a normal terminal.
     cmd.env("SYNAPSE_TERMINAL", "1");
+    // If Synapse itself was launched from inside a Claude Code session (e.g.
+    // `tauri dev` driven by Claude), the inherited child-session markers make
+    // the embedded `claude` treat itself as a nested session and skip
+    // transcript saving — and the conversation pane is fed entirely from those
+    // transcripts. Strip the markers so the embedded session is always a
+    // first-class one, and force persistence as a backstop.
+    cmd.env_remove("CLAUDE_CODE_CHILD_SESSION");
+    cmd.env_remove("CLAUDECODE");
+    cmd.env("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE", "1");
     if let Some(dir) = cwd.as_ref().filter(|d| !d.trim().is_empty()) {
         if std::path::Path::new(dir).is_dir() {
             cmd.cwd(dir);

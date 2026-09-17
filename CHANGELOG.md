@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] — 2026-09-17
+
+### Added
+- **Version in the top bar** — the running version now shows next to the
+  Synapse wordmark, so you can always see which build you're on at a glance.
+
 ## [0.2.5] — 2026-09-17
 
 ### Changed

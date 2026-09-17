@@ -709,6 +709,7 @@ export default function App() {
   const [dashOpen, setDashOpen] = useState(false);   // Mission Control overlay
   const [dash, setDash] = useState(null);            // get_dashboard snapshot
   const [whatsNew, setWhatsNew] = useState(null); // version string when shown
+  const [appVersion, setAppVersion] = useState("");
   const [welcomeOpen, setWelcomeOpen] = useState(false);
   const dragTab = useRef(null);
   const feedSearchRef = useRef(null);
@@ -716,6 +717,7 @@ export default function App() {
   // Post-update "what's new" (once per version) + first-run welcome tour.
   useEffect(() => {
     getVersion().then((v) => {
+      setAppVersion(v);
       const seen = localStorage.getItem(SEEN_VERSION_KEY);
       if (!localStorage.getItem(TOURED_KEY)) {
         setWelcomeOpen(true);
@@ -1473,7 +1475,10 @@ export default function App() {
       <Background mode={bgMode} color={bgColor} speed={filters.warpSpeed} light={effTheme === "light"} />
       <div className="app">
         <header className="topbar">
-          <div className="logo"><span className="logo-mark">◆</span> Synapse 2</div>
+          <div className="logo">
+            <span className="logo-mark">◆</span> Synapse 2
+            {appVersion && <span className="logo-ver" title="Installed version">v{appVersion}</span>}
+          </div>
           <div className="session-info" title={activeTab.cwd}>
             <span className="proj-dot" style={{ background: projectColor(activeTab.root || activeTab.cwd) }} />
             {activeTab.cwd}{activeTab.branch ? ` · ⌥ ${activeTab.branch}` : ""}

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.10] — 2026-09-17
+
+### Added
+- **Clickable version** — the version number in the top bar now opens the
+  What's New screen for the release you're on.
+
 ## [0.2.9] — 2026-09-17
 
 ### Fixed

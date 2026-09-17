@@ -1482,7 +1482,11 @@ export default function App() {
         <header className="topbar">
           <div className="logo">
             <span className="logo-mark">◆</span> Synapse 2
-            {appVersion && <span className="logo-ver" title="Installed version">v{appVersion}</span>}
+            {appVersion && (
+              <button className="logo-ver" onClick={() => setWhatsNew(appVersion)} title="What's new in this version">
+                v{appVersion}
+              </button>
+            )}
           </div>
           <div className="session-info" title={activeTab.cwd}>
             <span className="proj-dot" style={{ background: projectColor(activeTab.root || activeTab.cwd) }} />

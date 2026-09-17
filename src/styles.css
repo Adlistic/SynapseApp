@@ -874,7 +874,7 @@ kbd { background: var(--panel-2); border: 1px solid var(--border); border-bottom
 .update-chip { background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px; color: var(--muted); font: inherit; font-size: 12px; padding: 4px 11px; cursor: default; white-space: nowrap; }
 .update-chip.ready { color: #04121f; background: var(--accent); border-color: var(--accent); font-weight: 700; cursor: pointer; animation: livePulse 2.2s infinite; }
 .update-chip.ready:hover { animation: none; filter: brightness(1.1); }
-.update-modal { width: 580px; max-width: 92vw; max-height: 80vh; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px 18px 16px; box-shadow: 0 24px 80px rgba(0,0,0,0.55); }
+.update-modal { width: 680px; max-width: 92vw; max-height: 82vh; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px 18px 16px; box-shadow: 0 24px 80px rgba(0,0,0,0.55); }
 .update-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 2px; }
 .update-modal-sub { color: var(--muted); font-size: 11.5px; margin-bottom: 10px; }
 .update-modal-notes { flex: 1; min-height: 0; overflow-y: auto; font-size: 12.5px; border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; background: var(--bg); }

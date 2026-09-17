@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.9] — 2026-09-17
+
+### Fixed
+- **What's-new dialog no longer clipped** — with a background enabled, the
+  update dialog could get trapped and cut off inside the top bar; it now
+  always overlays the whole app, centered, and is a little roomier.
+
 ## [0.2.8] — 2026-09-17
 
 ### Fixed

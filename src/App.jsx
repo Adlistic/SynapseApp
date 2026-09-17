@@ -1,4 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -141,7 +142,10 @@ function UpdateChip() {
       >
         {ready ? "⬆ Update available" : st.status === "installing" ? "Installing…" : `⬆ ${st.progress}%`}
       </button>
-      {open && ready && (
+      {open && ready && createPortal(
+        // Portaled to <body>: the chip lives inside the topbar, whose
+        // backdrop-filter (when a background is active) turns it into a
+        // containing block that would trap and clip this "fixed" overlay.
         <div className="modal-backdrop" onClick={() => setOpen(false)}>
           <div className="update-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
             <div className="update-modal-head">
@@ -184,7 +188,8 @@ function UpdateChip() {
               <button className="update-later" onClick={() => setOpen(false)}>Later</button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

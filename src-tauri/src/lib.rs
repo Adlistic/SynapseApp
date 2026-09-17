@@ -721,7 +721,8 @@ pub fn run() {
             updater::check_for_updates,
             updater::install_update,
             updater::dismiss_update,
-            updater::sync_dismissed_update
+            updater::sync_dismissed_update,
+            updater::get_release_notes_since
         ])
         .run(tauri::generate_context!())
         .expect("error while running Synapse");

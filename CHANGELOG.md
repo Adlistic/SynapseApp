@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-09-17
+
+### Changed
+- **Cumulative what's new** — the update modal now lists every release
+  between the version you're running and the latest one, newest first, so
+  skipping a version never means missing its notes.
+
 ## [0.2.4] — 2026-09-17
 
 ### Changed

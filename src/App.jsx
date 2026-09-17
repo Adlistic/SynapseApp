@@ -111,8 +111,15 @@ function LimitChip({ icon, label, win }) {
 function UpdateChip() {
   const st = useUpdateStatus();
   const [open, setOpen] = useState(false);
+  // Cumulative notes: every release between the running version and the
+  // latest, fetched from the release feed when the modal opens. Falls back
+  // to the downloaded release's own notes when offline.
+  const [notesList, setNotesList] = useState(null);
   useEffect(() => {
     if (!open) return;
+    invoke("get_release_notes_since")
+      .then((l) => setNotesList(Array.isArray(l) && l.length > 0 ? l : null))
+      .catch(() => setNotesList(null));
     const onKey = (e) => { if (e.key === "Escape") setOpen(false); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -138,12 +145,26 @@ function UpdateChip() {
         <div className="modal-backdrop" onClick={() => setOpen(false)}>
           <div className="update-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
             <div className="update-modal-head">
-              <span className="logo"><span className="logo-mark">◆</span> What's new in v{st.version}</span>
+              <span className="logo"><span className="logo-mark">◆</span> What's new</span>
               <button className="tab-x" onClick={() => setOpen(false)} title="Close (Esc)">✕</button>
             </div>
-            <div className="update-modal-sub">Downloaded and verified in the background — installs only when you choose.</div>
+            <div className="update-modal-sub">
+              Everything since the version you're on. The update is downloaded and verified — it installs only when you choose.
+            </div>
             <div className="update-modal-notes md">
-              <Markdown>{st.notes || "_No release notes for this version._"}</Markdown>
+              {notesList ? (
+                notesList.map((r) => (
+                  <div key={r.version} className="update-rel">
+                    <div className="update-rel-head">v{r.version}</div>
+                    <Markdown>{r.notes || "_No notes for this release._"}</Markdown>
+                  </div>
+                ))
+              ) : (
+                <div className="update-rel">
+                  <div className="update-rel-head">v{st.version}</div>
+                  <Markdown>{st.notes || "_No release notes for this version._"}</Markdown>
+                </div>
+              )}
             </div>
             <div className="update-modal-btns">
               <button

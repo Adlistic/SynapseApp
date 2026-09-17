@@ -296,3 +296,58 @@ pub fn dismiss_update(app: AppHandle, version: String) {
 pub fn sync_dismissed_update(app: AppHandle, version: Option<String>) {
     app.state::<crate::AppState>().update.lock().dismissed = version;
 }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseNotes {
+    pub version: String,
+    pub notes: String,
+}
+
+fn semver_key(v: &str) -> Option<(u64, u64, u64)> {
+    let mut it = v.trim().trim_start_matches('v').splitn(3, '.');
+    let mut part = || it.next()?.parse::<u64>().ok();
+    Some((part()?, part()?, part()?))
+}
+
+/// Every published release NEWER than the running version, newest first —
+/// the "what's new since the version you're on" for the update modal. The
+/// release bodies are the changelog sections (the release workflow fills
+/// them), so concatenating them is the cumulative changelog. Same repo the
+/// updater endpoint in tauri.conf.json points at.
+#[tauri::command]
+pub async fn get_release_notes_since(app: AppHandle) -> Result<Vec<ReleaseNotes>, String> {
+    let current = app.package_info().version.to_string();
+    let cur = semver_key(&current).ok_or("unparseable current version")?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let releases: Vec<serde_json::Value> = client
+        .get("https://api.github.com/repos/Adlistic/SynapseApp/releases?per_page=30")
+        // GitHub's API rejects requests without a User-Agent.
+        .header("User-Agent", "Synapse-updater")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut out: Vec<ReleaseNotes> = releases
+        .iter()
+        .filter(|r| {
+            !r["draft"].as_bool().unwrap_or(false) && !r["prerelease"].as_bool().unwrap_or(false)
+        })
+        .filter_map(|r| {
+            let tag = r["tag_name"].as_str()?;
+            let key = semver_key(tag)?;
+            (key > cur).then(|| ReleaseNotes {
+                version: tag.trim_start_matches('v').to_string(),
+                notes: r["body"].as_str().unwrap_or("").to_string(),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| semver_key(&b.version).cmp(&semver_key(&a.version)));
+    Ok(out)
+}

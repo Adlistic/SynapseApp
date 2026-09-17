@@ -663,11 +663,22 @@ pub fn run() {
         // minimize/restore, so a JS listener misses it. MIN_GAP in updater.rs
         // throttles this to at most once per half hour.
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Focused(true) = event {
-                let app = window.app_handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    updater::check(app, false).await;
-                });
+            match event {
+                tauri::WindowEvent::Focused(true) => {
+                    let app = window.app_handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        updater::check(app, false).await;
+                    });
+                }
+                // Save geometry whenever focus leaves the app: the plugin only
+                // saves on graceful exit, so a force-killed process (or the
+                // update installer replacing us) would otherwise resurrect a
+                // stale position — often on the wrong monitor.
+                tauri::WindowEvent::Focused(false) => {
+                    use tauri_plugin_window_state::{AppHandleExt, StateFlags};
+                    let _ = window.app_handle().save_window_state(StateFlags::all());
+                }
+                _ => {}
             }
         })
         .setup(|app| {

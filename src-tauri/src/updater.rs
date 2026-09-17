@@ -234,6 +234,13 @@ fn install_and_restart(app: &AppHandle) -> Result<(), String> {
     };
     set_status(app, UpdateStatus::Installing { version: update.version.clone() });
     info!(target: "synapse2", version = %update.version, "installing update and restarting");
+    // Persist the window geometry BEFORE hiding (the visible flag is part of
+    // the saved state) — the installer replaces the process, which skips the
+    // plugin's normal save-on-exit.
+    {
+        use tauri_plugin_window_state::{AppHandleExt, StateFlags};
+        let _ = app.save_window_state(StateFlags::all());
+    }
     for (_, w) in app.webview_windows() {
         let _ = w.hide();
     }

@@ -248,7 +248,7 @@ function StatuslineRow() {
   );
 }
 
-function About() {
+function About({ onShowWhatsNew }) {
   const [version, setVersion] = useState("");
   const st = useUpdateStatus();
   // Last-check info refreshes with each status change so "checked just now"
@@ -271,7 +271,14 @@ function About() {
       <Item
         label="Version"
         hint="Synapse — Claude Code Workspace"
-        control={<span className="sm-version">{version ? `v${version}` : "—"}</span>}
+        control={
+          <span className="sm-version-row">
+            <span className="sm-version">{version ? `v${version}` : "—"}</span>
+            <button className="sm-btn" onClick={onShowWhatsNew} title="Show this version's changelog">
+              What's new
+            </button>
+          </span>
+        }
       />
       <Item
         label="Updates"
@@ -303,7 +310,7 @@ function About() {
 
 // ─── the modal ──────────────────────────────────────────────────────────────
 
-export default function SettingsModal({ open, onClose, filters, setFlag, setCat, setAllCats, reset, initialTab = "appearance" }) {
+export default function SettingsModal({ open, onClose, filters, setFlag, setCat, setAllCats, reset, initialTab = "appearance", onShowWhatsNew }) {
   const [tab, setTab] = useState(LEGACY[initialTab] || initialTab);
   const [query, setQuery] = useState("");
 
@@ -574,7 +581,7 @@ export default function SettingsModal({ open, onClose, filters, setFlag, setCat,
 
             {showSection("about") && (
               <Group title="About" desc="App version and updates.">
-                <About />
+                <About onShowWhatsNew={onShowWhatsNew} />
               </Group>
             )}
           </div>

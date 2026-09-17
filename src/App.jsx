@@ -111,6 +111,12 @@ function LimitChip({ icon, label, win }) {
 function UpdateChip() {
   const st = useUpdateStatus();
   const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => { if (e.key === "Escape") setOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
   if (st.status !== "ready" && st.status !== "downloading" && st.status !== "installing") return null;
   const ready = st.status === "ready";
   return (
@@ -129,17 +135,17 @@ function UpdateChip() {
         {ready ? "⬆ Update available" : st.status === "installing" ? "Installing…" : `⬆ ${st.progress}%`}
       </button>
       {open && ready && (
-        <>
-          <div className="update-pop-overlay" onClick={() => setOpen(false)} />
-          <div className="update-pop" role="dialog" aria-label="Update available">
-            <div className="update-pop-head">
-              <b>Synapse {st.version}</b>
-              <span className="update-pop-sub">downloaded &amp; verified — installs only when you choose</span>
+        <div className="modal-backdrop" onClick={() => setOpen(false)}>
+          <div className="update-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+            <div className="update-modal-head">
+              <span className="logo"><span className="logo-mark">◆</span> What's new in v{st.version}</span>
+              <button className="tab-x" onClick={() => setOpen(false)} title="Close (Esc)">✕</button>
             </div>
-            <div className="update-pop-notes md">
+            <div className="update-modal-sub">Downloaded and verified in the background — installs only when you choose.</div>
+            <div className="update-modal-notes md">
               <Markdown>{st.notes || "_No release notes for this version._"}</Markdown>
             </div>
-            <div className="update-pop-btns">
+            <div className="update-modal-btns">
               <button
                 className="update-go"
                 onClick={() => installUpdate().catch(() => {})}
@@ -154,9 +160,10 @@ function UpdateChip() {
               >
                 Skip this version
               </button>
+              <button className="update-later" onClick={() => setOpen(false)}>Later</button>
             </div>
           </div>
-        </>
+        </div>
       )}
     </div>
   );
@@ -1120,7 +1127,20 @@ export default function App() {
   const tabPos = filters.tabPosition || "top";
   const rootClass = "root" + (bgMode !== "none" ? " bg-active" : "");
   const settingsModal = (
-    <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} filters={filters} setFlag={setFlag} setCat={setCat} setAllCats={setAllCats} reset={resetFilters} initialTab={settingsTab} />
+    <SettingsModal
+      open={settingsOpen}
+      onClose={() => setSettingsOpen(false)}
+      filters={filters}
+      setFlag={setFlag}
+      setCat={setCat}
+      setAllCats={setAllCats}
+      reset={resetFilters}
+      initialTab={settingsTab}
+      onShowWhatsNew={() => {
+        setSettingsOpen(false);
+        getVersion().then((v) => setWhatsNew(v)).catch(() => {});
+      }}
+    />
   );
   const browserModal = browserOpen && (
     <SessionBrowser onResume={resume} onClose={() => setBrowserOpen(false)} />

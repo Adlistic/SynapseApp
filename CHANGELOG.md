@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-09-17
+
+### Changed
+- **What's-new modal for updates** — clicking "⬆ Update available" now opens
+  a proper centered modal with the release notes (no more hovering to see
+  them), with Restart to update, Skip this version, and Later.
+- **What's new in Settings** — Settings → About → "What's new" reopens the
+  current version's changelog anytime.
+
 ## [0.2.3] — 2026-09-17
 
 ### Changed

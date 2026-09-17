@@ -658,6 +658,18 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .manage(terminals::Terminals::default())
+        // Re-check for updates whenever the window regains focus — Rust-side,
+        // because WebView2 never fires the page's visibilitychange on
+        // minimize/restore, so a JS listener misses it. MIN_GAP in updater.rs
+        // throttles this to at most once per half hour.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Focused(true) = event {
+                let app = window.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    updater::check(app, false).await;
+                });
+            }
+        })
         .setup(|app| {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_title("Synapse — Claude Code Workspace");

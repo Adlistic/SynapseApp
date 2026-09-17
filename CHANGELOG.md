@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7] — 2026-09-17
+
+### Fixed
+- **Update checks on window focus** — coming back to the app now checks for
+  updates (at most once per half hour), instead of waiting for the six-hour
+  timer. Previously the "re-check when visible again" never fired on Windows.
+
 ## [0.2.6] — 2026-09-17
 
 ### Added

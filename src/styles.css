@@ -865,13 +865,24 @@ kbd { background: var(--panel-2); border: 1px solid var(--border); border-bottom
 
 .dash-empty { text-align: center; color: var(--muted); padding: 60px 0 50px; font-size: 13px; }
 
-/* ── Update bar — shown only when an update is downloaded and waiting ── */
-.update-bar { display: flex; align-items: center; gap: 10px; padding: 6px 14px; background: color-mix(in srgb, var(--accent) 12%, var(--panel)); border-bottom: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border)); font-size: 12px; flex-shrink: 0; }
-.root > .update-bar { position: relative; z-index: 2; }
-.update-msg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.update-go { background: var(--accent); color: #04121f; border: none; border-radius: 8px; padding: 4px 12px; font-weight: 700; font-size: 12px; cursor: pointer; }
+/* ── Update button — top-right chip + what's-new popover ──
+   Appears only when a release is found; the download is silent and nothing
+   installs until the user chooses. */
+.update-wrap { position: relative; }
+.update-float { position: absolute; top: 12px; right: 14px; z-index: 5; }
+.update-chip { background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px; color: var(--muted); font: inherit; font-size: 12px; padding: 4px 11px; cursor: default; white-space: nowrap; }
+.update-chip.ready { color: #04121f; background: var(--accent); border-color: var(--accent); font-weight: 700; cursor: pointer; animation: livePulse 2.2s infinite; }
+.update-chip.ready:hover { animation: none; filter: brightness(1.1); }
+.update-pop-overlay { position: fixed; inset: 0; z-index: 79; }
+.update-pop { position: absolute; top: calc(100% + 8px); right: 0; z-index: 80; width: 380px; max-width: 90vw; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 16px 50px rgba(0,0,0,0.5); padding: 12px 14px; }
+.update-pop-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; }
+.update-pop-head b { font-size: 14px; }
+.update-pop-sub { color: var(--muted); font-size: 11px; }
+.update-pop-notes { max-height: 300px; overflow-y: auto; font-size: 12px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--bg); }
+.update-pop-btns { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+.update-go { background: var(--accent); color: #04121f; border: none; border-radius: 8px; padding: 5px 13px; font-weight: 700; font-size: 12px; cursor: pointer; }
 .update-go:hover { filter: brightness(1.1); }
-.update-later { background: transparent; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); padding: 3px 10px; font-size: 12px; cursor: pointer; }
+.update-later { background: transparent; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); padding: 4px 10px; font-size: 12px; cursor: pointer; }
 .update-later:hover { color: var(--text); border-color: var(--muted); }
 
 /* Project identity — same-folder sessions read as siblings: a colored stripe

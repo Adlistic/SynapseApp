@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-09-17
+
+### Changed
+- **Update button** — an available update now shows as a compact
+  "⬆ Update available" button at the top right instead of a full-width bar.
+  Click it to read what's new for that release, then "Restart to update"
+  when it suits you — or "Skip this version". Updates still download
+  silently in the background, are signature-verified, and never install
+  themselves.
+- **Release notes in-app** — the update popover (and the GitHub release
+  page) now shows the changelog section for the new version, so you can see
+  what you're getting before you restart.
+
 ## [0.2.2] — 2026-09-17
 
 ### Added

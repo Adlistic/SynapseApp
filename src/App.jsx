@@ -103,37 +103,63 @@ function LimitChip({ icon, label, win }) {
   );
 }
 
-// Slim strip shown only when an update is downloaded, verified, and waiting —
-// the download itself happens silently in Rust (see src-tauri/src/updater.rs).
-// Installing restarts the app, which ends every running claude session, so it
-// is always the user's click, never automatic.
-function UpdateBar() {
+// Compact top-right update control. The download happens silently in Rust
+// (see src-tauri/src/updater.rs); this button appears once a release is found
+// and opens a popover with the release notes ("what's new") plus the install
+// choice. Installing restarts the app, which ends every running claude
+// session, so it is always the user's click, never automatic.
+function UpdateChip() {
   const st = useUpdateStatus();
-  if (st.status === "ready") {
-    return (
-      <div className="update-bar" title={st.notes ? `What's in ${st.version}:\n${st.notes}` : undefined}>
-        <span className="update-msg">⬆ Synapse {st.version} is downloaded and ready.</span>
-        <button
-          className="update-go"
-          onClick={() => installUpdate().catch(() => {})}
-          title="Installs and relaunches — finish any running Claude turn first: restarting closes every session"
-        >
-          Restart to update
-        </button>
-        <button
-          className="update-later"
-          onClick={() => dismissUpdate(st.version)}
-          title="Skip this version — the next release will show again"
-        >
-          Skip
-        </button>
-      </div>
-    );
-  }
-  if (st.status === "installing") {
-    return <div className="update-bar"><span className="update-msg">Installing Synapse {st.version}…</span></div>;
-  }
-  return null;
+  const [open, setOpen] = useState(false);
+  if (st.status !== "ready" && st.status !== "downloading" && st.status !== "installing") return null;
+  const ready = st.status === "ready";
+  return (
+    <div className="update-wrap">
+      <button
+        className={"update-chip" + (ready ? " ready" : "")}
+        onClick={() => ready && setOpen((v) => !v)}
+        title={
+          ready
+            ? `Synapse ${st.version} is downloaded and ready — click for what's new`
+            : st.status === "installing"
+            ? `Installing Synapse ${st.version}…`
+            : `Downloading Synapse ${st.version} in the background — ${st.progress}%`
+        }
+      >
+        {ready ? "⬆ Update available" : st.status === "installing" ? "Installing…" : `⬆ ${st.progress}%`}
+      </button>
+      {open && ready && (
+        <>
+          <div className="update-pop-overlay" onClick={() => setOpen(false)} />
+          <div className="update-pop" role="dialog" aria-label="Update available">
+            <div className="update-pop-head">
+              <b>Synapse {st.version}</b>
+              <span className="update-pop-sub">downloaded &amp; verified — installs only when you choose</span>
+            </div>
+            <div className="update-pop-notes md">
+              <Markdown>{st.notes || "_No release notes for this version._"}</Markdown>
+            </div>
+            <div className="update-pop-btns">
+              <button
+                className="update-go"
+                onClick={() => installUpdate().catch(() => {})}
+                title="Installs and relaunches — finish any running Claude turn first: restarting closes every session"
+              >
+                Restart to update
+              </button>
+              <button
+                className="update-later"
+                onClick={() => { dismissUpdate(st.version); setOpen(false); }}
+                title="Hide this version — the next release will offer again"
+              >
+                Skip this version
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
 }
 
 const CMD_RE = /^\s*<command-name>([^<]*)<\/command-name>/;
@@ -1258,7 +1284,7 @@ export default function App() {
     return (
       <div className={rootClass}>
         <Background mode={bgMode} color={bgColor} speed={filters.warpSpeed} light={effTheme === "light"} />
-        <UpdateBar />
+        <div className="update-float"><UpdateChip /></div>
         <Launch onStart={start} recent={recentList} onOpenSettings={() => openSettings("appearance")} onOpenBrowser={() => setBrowserOpen(true)} />
         {browserModal}
         {settingsModal}
@@ -1405,7 +1431,6 @@ export default function App() {
     <div className={rootClass}>
       <Background mode={bgMode} color={bgColor} speed={filters.warpSpeed} light={effTheme === "light"} />
       <div className="app">
-        <UpdateBar />
         <header className="topbar">
           <div className="logo"><span className="logo-mark">◆</span> Synapse 2</div>
           <div className="session-info" title={activeTab.cwd}>
@@ -1438,6 +1463,7 @@ export default function App() {
             )}
             {busy ? <span className="pulse">● working…</span> : ready ? `${turns.length} turn(s)` : ""}
           </div>
+          <UpdateChip />
           <button className="filters-btn hk-btn" onClick={() => setHotkeysOpen(true)} title="Keyboard shortcuts (Ctrl+Shift+D)">⌨</button>
           <button className="filters-btn" onClick={() => openSettings("appearance")} title="Settings">⚙ Settings</button>
         </header>

@@ -1470,8 +1470,18 @@ export default function App() {
             </div>
           ))
         : tabs.map((t) => renderTab(t, false))}
-      <button className="tab-new" onClick={() => setNewOpen(true)} title="New session">＋</button>
-      <button className="tab-new" onClick={() => setBrowserOpen(true)} title="Resume a previous session">⧉</button>
+      {tabPos === "left" ? (
+        // The rail has room for labels — two proper buttons side by side.
+        <div className="rail-actions">
+          <button className="rail-btn" onClick={() => setNewOpen(true)} title="Start a new session (Ctrl+Shift+T)">＋ New</button>
+          <button className="rail-btn" onClick={() => setBrowserOpen(true)} title="Resume a previous session (Ctrl+Shift+R)">⧉ Resume</button>
+        </div>
+      ) : (
+        <>
+          <button className="tab-new" onClick={() => setNewOpen(true)} title="New session">＋</button>
+          <button className="tab-new" onClick={() => setBrowserOpen(true)} title="Resume a previous session">⧉</button>
+        </>
+      )}
     </div>
   );
 

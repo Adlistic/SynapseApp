@@ -142,6 +142,10 @@ html, body, #root {
 .tabbar.left .tab:hover .tab-x:hover { opacity: 1; }
 .tab-new { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 16px; padding: 0 12px; align-self: center; }
 .tab-new:hover { color: var(--accent); }
+/* Left-rail session actions: two labeled buttons side by side. */
+.rail-actions { display: flex; gap: 6px; margin-top: 6px; }
+.rail-btn { flex: 1; min-width: 0; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font: inherit; font-size: 12px; font-weight: 600; padding: 6px 4px; cursor: pointer; white-space: nowrap; }
+.rail-btn:hover { border-color: var(--accent); color: var(--accent); }
 .term-host { height: 100%; }
 .launch-overlay { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(3px); }
 .launch-head-btns { display: flex; gap: 6px; }

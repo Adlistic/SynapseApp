@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Clickable version** — the version number in the top bar now opens the
   What's New screen for the release you're on.
+- **Labeled sidebar buttons** — the left tab rail's ＋ / ⧉ icons are now two
+  proper side-by-side buttons: "＋ New" and "⧉ Resume".
 
 ## [0.2.9] — 2026-09-17
 

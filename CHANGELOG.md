@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.11] — 2026-09-18
+
+### Changed
+- **Mission Control cards, decluttered** — each card now reads top-to-bottom
+  as one idea per zone: name + status pill, the "now" line, the plan (current
+  step plus the next two), live agents, then two labelled vitals (context and
+  tokens) above a quiet footer. The unlabelled tool-mix rainbow bar and the
+  full folder path are gone from the card face — the path lives on the name's
+  tooltip, the tool breakdown on the tools count's tooltip.
+
 ## [0.2.10] — 2026-09-17
 
 ### Added

@@ -5,7 +5,6 @@ import { TOOL_CATS, baseNameOf, normRoot, projectColor, tabDisplayName } from ".
 // renders from the backend's `get_dashboard` snapshot (tailer cache, no file
 // I/O) plus the same busy/attention signals the tab bar already uses.
 
-const CAT_COLOR = Object.fromEntries(TOOL_CATS.map((c) => [c.key, c.color]));
 const CAT_LABEL = Object.fromEntries(TOOL_CATS.map((c) => [c.key, c.label]));
 
 function fmtTokens(n) {
@@ -149,69 +148,46 @@ function Gauge({ pct, label, sub, title }) {
   );
 }
 
-// Stacked tool-category mix bar (main-chain tool calls).
-function CatMix({ byCategory }) {
-  const entries = Object.entries(byCategory || {}).filter(([, n]) => n > 0);
-  const total = entries.reduce((a, [, n]) => a + n, 0);
-  if (!total) return null;
-  entries.sort((a, b) => b[1] - a[1]);
-  return (
-    <div className="dash-catmix" title={entries.map(([k, n]) => `${CAT_LABEL[k] || k}: ${n}`).join("\n")}>
-      {entries.map(([k, n]) => (
-        <span key={k} style={{ width: (n / total) * 100 + "%", background: CAT_COLOR[k] || "#666" }} />
-      ))}
-    </div>
-  );
-}
-
-function Todos({ todos }) {
+// The plan, compressed to what you'd act on: one progress line, the step in
+// flight, and at most two queued steps. The full list lives in the session.
+function PlanRow({ todos }) {
   if (!todos || todos.length === 0) return null;
   const done = todos.filter((x) => x.status === "completed").length;
-  const active = todos.filter((x) => x.status === "in_progress");
+  const active = todos.find((x) => x.status === "in_progress");
   const pending = todos.filter((x) => x.status === "pending");
-  const shown = [...active, ...pending].slice(0, 4);
   return (
-    <div className="dash-todos">
-      <div className="dash-todos-head">
+    <div className="dash-plan">
+      <div className="dash-plan-head">
         <span className="dash-sec-label">PLAN</span>
-        <span className="dash-todos-count">{done}/{todos.length}</span>
+        <div className="dash-bar slim dash-plan-bar">
+          <span style={{ width: (done / todos.length) * 100 + "%" }} />
+        </div>
+        <span className="dash-plan-count">{done}/{todos.length}</span>
       </div>
-      <div className="dash-bar slim">
-        <span style={{ width: (done / todos.length) * 100 + "%" }} />
-      </div>
-      <ul>
-        {shown.map((x, i) => (
-          <li key={i} className={x.status}>
-            <span className="dash-todo-ico">{x.status === "in_progress" ? "►" : "○"}</span>
-            <span className="dash-todo-text">{x.status === "in_progress" ? (x.activeForm || x.content) : x.content}</span>
-          </li>
-        ))}
-        {active.length + pending.length > 4 && (
-          <li className="more">＋{active.length + pending.length - 4} more</li>
-        )}
-      </ul>
-    </div>
-  );
-}
-
-function Agents({ agents, now }) {
-  if (!agents || agents.length === 0) return null;
-  const active = agents.filter((a) => !a.done);
-  const done = agents.length - active.length;
-  return (
-    <div className="dash-agents">
-      <span className="dash-sec-label">AGENTS</span>
-      {active.map((a) => (
-        <span key={a.id} className="dash-agent live" title={`${a.agentType || "subagent"} — running ${fmtDur(now - a.startedMs)}`}>
-          <span className="dash-agent-dot" />{a.name}
-        </span>
+      {active && (
+        <div className="dash-plan-item doing">
+          <span className="dash-todo-ico">►</span>
+          <span className="dash-todo-text">{active.activeForm || active.content}</span>
+        </div>
+      )}
+      {pending.slice(0, 2).map((x, i) => (
+        <div key={i} className="dash-plan-item">
+          <span className="dash-todo-ico">○</span>
+          <span className="dash-todo-text">{x.content}</span>
+        </div>
       ))}
-      {active.length === 0 && <span className="dash-agent-none">none running</span>}
-      {done > 0 && <span className="dash-agent-done">{done} finished</span>}
+      {pending.length > 2 && <div className="dash-plan-more">＋{pending.length - 2} queued</div>}
     </div>
   );
 }
 
+/**
+ * Session card, redesigned around one idea per zone, top to bottom:
+ * identity → what it's doing right now → the plan → live agents →
+ * labelled vitals → a quiet footer. Everything secondary moved into
+ * tooltips (cwd on the name, category mix on the tools count, cost detail
+ * on the tokens stat) so the card reads in one pass.
+ */
 function SessionCard({ t, sess, busy, now, color, onJump }) {
   const s = sess?.stats;
   const usage = sess?.usage;
@@ -219,10 +195,15 @@ function SessionCard({ t, sess, busy, now, color, onJump }) {
   const cost = estCost(s?.models);
   const ctx = s?.contextTokens || 0;
   const win = ctxWindowFor(s?.lastModel);
+  const ctxPct = Math.min(100, Math.round((ctx / win) * 100));
+  const ctxTier = ctxPct >= 90 ? "red" : ctxPct >= 70 ? "orange" : ctxPct >= 50 ? "gold" : "";
   const inTok = (usage?.input || 0) + (usage?.cacheCreation || 0);
   const outTok = usage?.output || 0;
-  const activeAgents = (s?.agents || []).filter((a) => !a.done).length;
-  const elapsed = s?.firstTsMs ? fmtDur((s.lastTsMs || now) - s.firstTsMs) : "";
+  const activeAgents = (s?.agents || []).filter((a) => !a.done);
+  const catTip = Object.entries(s?.byCategory || {})
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, n]) => `${CAT_LABEL[k] || k}: ${n}`)
+    .join("\n");
   return (
     <div
       className={"dash-card " + st.key}
@@ -231,13 +212,14 @@ function SessionCard({ t, sess, busy, now, color, onJump }) {
       title="Open this session"
     >
       <div className="dash-card-head">
-        <span className={"dash-dot " + st.key} title={st.hint} />
-        <span className="dash-card-name">{tabDisplayName(t)}</span>
+        <span className="dash-card-name" title={t.cwd}>{tabDisplayName(t)}</span>
         {t.branch && <span className="dash-chip branch" title={`Worktree branch ${t.branch}`}>⌥ {t.branch.replace(/^synapse2\//, "")}</span>}
         {s?.lastModel && <span className="dash-chip model">{shortModel(s.lastModel)}</span>}
-        <span className={"dash-status " + st.key}>{st.label}</span>
+        <span className={"dash-status-pill " + st.key} title={st.hint}>
+          <span className={"dash-dot " + st.key} />
+          {st.label}
+        </span>
       </div>
-      <div className="dash-cwd" title={t.cwd}>{t.cwd}</div>
 
       <div className="dash-now" title={s?.lastActivity || ""}>
         <span className="dash-now-glyph">{KIND_GLYPH[s?.lastKind] || "·"}</span>
@@ -245,43 +227,45 @@ function SessionCard({ t, sess, busy, now, color, onJump }) {
         <span className="dash-now-when">{relTime(s?.lastTsMs, now)}</span>
       </div>
 
-      <Todos todos={s?.todos} />
-      <Agents agents={s?.agents} now={now} />
+      <PlanRow todos={s?.todos} />
 
-      <div className="dash-meters">
-        <Gauge
-          pct={(ctx / win) * 100}
-          label="context"
-          sub={ctx ? `${fmtTokens(ctx)} / ${fmtTokens(win)}` : "—"}
-          title="How full the context window is (last response's input + cache tokens)"
-        />
-        <div className="dash-gauge">
-          <div className="dash-gauge-top">
-            <span>tokens</span>
-            <span className="dash-gauge-sub">{fmtCost(cost)}</span>
+      {activeAgents.length > 0 && (
+        <div className="dash-agents">
+          <span className="dash-sec-label">AGENTS</span>
+          {activeAgents.map((a) => (
+            <span key={a.id} className="dash-agent live" title={`${a.agentType || "subagent"} — running ${fmtDur(now - a.startedMs)}`}>
+              <span className="dash-agent-dot" />{a.name}
+            </span>
+          ))}
+        </div>
+      )}
+
+      <div className="dash-vitals">
+        <div className="dash-vital" title="How full the context window is (last response's input + cache tokens)">
+          <span className="dash-sec-label">CONTEXT</span>
+          <div className={"dash-bar " + ctxTier}>
+            <span style={{ width: ctxPct + "%" }} />
           </div>
-          <div className="dash-tokens" title={`Input ${fmtTokens(inTok)} · Output ${fmtTokens(outTok)}\nCost is an estimate from published per-model pricing`}>
-            <span>⇣ {fmtTokens(inTok)}</span>
-            <span>⇡ {fmtTokens(outTok)}</span>
-          </div>
+          <span className="dash-vital-num">{ctx ? `${ctxPct}%` : "—"}</span>
+        </div>
+        <div className="dash-vital" title={`Input ${fmtTokens(inTok)} · Output ${fmtTokens(outTok)}\nCost is an estimate from published per-model pricing`}>
+          <span className="dash-sec-label">TOKENS</span>
+          <span className="dash-vital-num">⇣ {fmtTokens(inTok)} · ⇡ {fmtTokens(outTok)}</span>
+          <span className="dash-vital-cost">{fmtCost(cost)}</span>
         </div>
       </div>
 
-      <CatMix byCategory={s?.byCategory} />
-
       <div className="dash-foot">
         <span title="Prompts you've sent">{s?.turns || 0} turns</span>
-        <span title={`Tool calls${s?.sidechainCalls ? ` (+${s.sidechainCalls} by subagents)` : ""}`}>
+        <span title={catTip ? `Tool calls by kind:\n${catTip}` : "Tool calls"}>
           {s?.toolCalls || 0}{s?.sidechainCalls ? `+${s.sidechainCalls}` : ""} tools
         </span>
-        {(s?.toolErrors || 0) > 0 && <span className="err" title="Failed tool calls">{s.toolErrors} errors</span>}
         {(s?.files?.length || 0) > 0 && (
           <span title={"Files touched:\n" + s.files.slice(0, 14).join("\n") + (s.files.length > 14 ? "\n…" : "")}>
             {s.files.length} files
           </span>
         )}
-        {activeAgents > 0 && <span className="live">{activeAgents} agent{activeAgents > 1 ? "s" : ""} live</span>}
-        {elapsed && <span title="From first to latest transcript activity">{elapsed}</span>}
+        {(s?.toolErrors || 0) > 0 && <span className="err" title="Failed tool calls">{s.toolErrors} errors</span>}
         <Spark events={s?.recentEvents} now={now} />
       </div>
     </div>

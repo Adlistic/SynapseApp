@@ -812,42 +812,49 @@ kbd { background: var(--panel-2); border: 1px solid var(--border); border-bottom
 .dash-card-name { font-weight: 700; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dash-chip { font-size: 10px; padding: 1px 7px; border-radius: 9px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
 .dash-chip.model { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
-.dash-status { margin-left: auto; font-size: 10.5px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; white-space: nowrap; }
-.dash-status.working { color: #69db7c; }
-.dash-status.attention { color: #ffc700; }
-.dash-status.idle { color: var(--muted); }
+/* Status as one tinted pill (dot + word) — the card's single loudest signal. */
+.dash-status-pill { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; font-size: 10.5px; font-weight: 800; letter-spacing: 0.6px; text-transform: uppercase; white-space: nowrap; border-radius: 999px; padding: 4px 11px; flex-shrink: 0; }
+.dash-status-pill.working { color: #69db7c; background: rgba(105, 219, 124, 0.1); border: 1px solid rgba(105, 219, 124, 0.35); }
+.dash-status-pill.attention { color: #ffc700; background: rgba(255, 199, 0, 0.1); border: 1px solid rgba(255, 199, 0, 0.4); }
+.dash-status-pill.idle { color: var(--muted); background: rgba(255, 255, 255, 0.04); border: 1px solid var(--border); }
 .dash-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
 .dash-dot.working { background: #69db7c; animation: livePulse 1.2s infinite; }
 .dash-dot.attention { background: #ffc700; animation: livePulse 1.6s infinite; }
 .dash-dot.idle { background: var(--muted); opacity: 0.5; }
-.dash-cwd { color: var(--muted); font-size: 10.5px; margin: 3px 0 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-/* Current-activity line */
-.dash-now { display: flex; align-items: center; gap: 7px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px; padding: 6px 9px; font-size: 12px; }
+/* Current-activity line — the card's hero row. */
+.dash-now { display: flex; align-items: center; gap: 8px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 9px 11px; font-size: 12.5px; margin-top: 10px; }
 .dash-now-glyph { color: var(--accent-2); flex: none; font-weight: 700; }
 .dash-now-text { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: "Cascadia Code", ui-monospace, Consolas, monospace; font-size: 11.5px; }
 .dash-now-when { color: var(--muted); font-size: 10.5px; white-space: nowrap; }
 
 /* Sections inside a card */
 .dash-sec-label { font-size: 9.5px; letter-spacing: 1px; color: var(--muted); font-weight: 700; }
-.dash-todos { margin-top: 9px; }
-.dash-todos-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
-.dash-todos-count { font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.dash-todos ul { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
-.dash-todos li { display: flex; gap: 7px; align-items: baseline; font-size: 11.5px; color: var(--muted); min-width: 0; }
-.dash-todos li.in_progress { color: var(--text); }
-.dash-todos li.in_progress .dash-todo-ico { color: #69db7c; animation: livePulse 1.2s infinite; }
-.dash-todos li .dash-todo-ico { flex: none; font-size: 9px; }
-.dash-todos li .dash-todo-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dash-todos li.more { color: var(--muted); font-size: 10.5px; }
+/* Plan: label, progress and count share ONE header line; the in-flight step
+   is the only bright row. */
+.dash-plan { margin-top: 11px; display: flex; flex-direction: column; gap: 5px; }
+.dash-plan-head { display: flex; align-items: center; gap: 10px; margin-bottom: 2px; }
+.dash-plan-bar { flex: 1; }
+.dash-plan-count { font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.dash-plan-item { display: flex; gap: 8px; align-items: baseline; font-size: 12px; color: var(--muted); min-width: 0; }
+.dash-plan-item.doing { color: var(--text); font-weight: 600; }
+.dash-plan-item.doing .dash-todo-ico { color: #69db7c; animation: livePulse 1.2s infinite; }
+.dash-plan-item .dash-todo-ico { flex: none; font-size: 9px; width: 12px; }
+.dash-plan-item .dash-todo-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dash-plan-more { font-size: 10.5px; color: var(--muted); margin-left: 20px; }
 .dash-agents { margin-top: 9px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .dash-agent { font-size: 10.5px; padding: 2px 8px; border-radius: 9px; border: 1px solid var(--border); color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dash-agent.live { color: var(--text); border-color: rgba(105, 219, 124, 0.5); display: inline-flex; align-items: center; gap: 5px; }
 .dash-agent-dot { width: 6px; height: 6px; border-radius: 50%; background: #69db7c; animation: livePulse 1.2s infinite; flex: none; }
 .dash-agent-none, .dash-agent-done { font-size: 10.5px; color: var(--muted); }
 
-/* Gauges + meters */
-.dash-meters { margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+/* Vitals: two labelled stat rows sharing one aligned grid, above the footer. */
+.dash-vitals { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.dash-vital { display: grid; grid-template-columns: 64px 1fr auto; align-items: center; gap: 12px; }
+.dash-vital .dash-bar { width: 100%; }
+.dash-vital-num { font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; justify-self: start; }
+.dash-vital-cost { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* Gauge (still used by the rate-limit tiles in the overview strip) */
 .dash-gauge-top { display: flex; justify-content: space-between; font-size: 10px; letter-spacing: 0.6px; text-transform: uppercase; color: var(--muted); margin-bottom: 3px; }
 .dash-gauge-sub { text-transform: none; letter-spacing: 0; font-variant-numeric: tabular-nums; }
 .dash-bar { height: 5px; border-radius: 3px; background: var(--panel-2); border: 1px solid var(--border); overflow: hidden; }
@@ -856,14 +863,9 @@ kbd { background: var(--panel-2); border: 1px solid var(--border); border-bottom
 .dash-bar.gold > span { background: #ffc700; }
 .dash-bar.orange > span { background: #f97316; }
 .dash-bar.red > span { background: #ef4444; }
-.dash-tokens { display: flex; gap: 12px; font-size: 12px; font-variant-numeric: tabular-nums; padding-top: 1px; }
-.dash-catmix { margin-top: 10px; display: flex; height: 5px; border-radius: 3px; overflow: hidden; opacity: 0.9; }
-.dash-catmix > span { display: block; height: 100%; min-width: 2px; }
-
 /* Card footer */
-.dash-foot { margin-top: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.dash-foot { margin-top: 8px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .dash-foot .err { color: #ef4444; font-weight: 700; }
-.dash-foot .live { color: #69db7c; font-weight: 700; }
 .dash-spark { margin-left: auto; width: 78px; height: 20px; flex: none; }
 .dash-spark rect { fill: var(--accent); }
 .dash-spark rect.z { fill: var(--border); }

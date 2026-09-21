@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.12] — 2026-09-21
+
+### Added
+- **Tab status icons** — a real spinner while a session works, pulsing amber
+  glyphs when it needs you (⚠ approval, ? question, ▤ plan review), and a
+  flashing chip naming the tool in flight (Bash, Edit, …), flush against the
+  tab's right edge.
+
+### Changed
+- **Status logic understands the whole turn** — thinking, a tool running,
+  and the gap while Claude composes its next step all count as working;
+  "waiting for approval?" only appears after a quiet grace period, and never
+  in full-autonomy sessions (they have no approval prompts to wait on).
+
+### Fixed
+- **Double space in the terminal** — pressing space typed two; the dictation
+  forwarder was re-sending keyboard residue.
+- **Ctrl+Enter / Shift+Enter insert a newline** in Claude's prompt inside the
+  embedded terminal instead of submitting.
+- **Tab rename box** now stretches the full width of the rail, and the
+  hover-only ✕ no longer reserves dead space at the tab's right edge.
+
 ## [0.2.11] — 2026-09-18
 
 ### Changed

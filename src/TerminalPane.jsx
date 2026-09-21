@@ -40,17 +40,25 @@ export default function TerminalPane({ cwd, command, onTermId, composer = false 
     // would vanish. (Normal typing never lands in the textarea: xterm handles
     // it on keydown, so this listener only fires for automation/dictation.)
     const ta = term.textarea;
+    // Keyboard keystrokes reach the PTY through xterm's own pipeline, but some
+    // (space, notably) also leave their character behind in the textarea —
+    // forwarding that residue sent the space TWICE. A real keystroke always
+    // fires keydown immediately before the input event; automation/dictation
+    // inserts text with no keydown at all. That's the discriminator.
+    let lastKeyDownAt = 0;
+    const onTaKeyDown = () => { lastKeyDownAt = Date.now(); };
     const onTaInput = (e) => {
       if (e.isComposing) return; // IME composition is xterm's to handle
       const v = ta.value;
-      if (v) {
-        ta.value = "";
-        term.paste(v);
-      }
+      if (!v) return;
+      ta.value = ""; // always drain, so stale residue never rides a later paste
+      if (Date.now() - lastKeyDownAt < 100) return; // typing residue — xterm already sent it
+      term.paste(v);
     };
     if (ta) {
       ta.removeAttribute("aria-hidden");
       ta.setAttribute("aria-label", "Terminal input");
+      ta.addEventListener("keydown", onTaKeyDown);
       ta.addEventListener("input", onTaInput);
     }
 
@@ -64,6 +72,16 @@ export default function TerminalPane({ cwd, command, onTermId, composer = false 
     //   Ctrl+Shift+C, or Ctrl+C with a selection → copy (else Ctrl+C = SIGINT)
     //   Ctrl+V / Ctrl+Shift+V → paste from the OS clipboard
     term.attachCustomKeyEventHandler((e) => {
+      // Ctrl+Enter / Shift+Enter → newline in Claude Code's input, not submit.
+      // xterm sends plain \r for both (it lacks the enhanced key encoding
+      // Windows Terminal uses), so claude can't tell them apart from Enter.
+      // ESC+CR is claude's Alt/Option+Enter newline sequence — send that.
+      if (e.type === "keydown" && e.key === "Enter" && (e.ctrlKey || e.shiftKey) && !e.altKey) {
+        if (termIdRef.current != null) {
+          invoke("term_input", { id: termIdRef.current, data: "\x1b\r" }).catch(() => {});
+        }
+        return false;
+      }
       if (e.type !== "keydown" || !e.ctrlKey) return true;
       if (e.code === "KeyC") {
         const sel = term.getSelection();
@@ -133,7 +151,10 @@ export default function TerminalPane({ cwd, command, onTermId, composer = false 
       clearTimeout(t);
       window.removeEventListener("resize", onResize);
       host?.removeEventListener("contextmenu", onCtx);
-      if (ta) ta.removeEventListener("input", onTaInput);
+      if (ta) {
+        ta.removeEventListener("keydown", onTaKeyDown);
+        ta.removeEventListener("input", onTaInput);
+      }
       termIdRef.current = null;
       onTermId?.(null);
       if (unlistenData) unlistenData();

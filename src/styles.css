@@ -130,16 +130,28 @@ html, body, #root {
 .tab-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
 .tab-dot.working { background: #69db7c; animation: livePulse 1.2s infinite; }
 .tab-dot.idle { background: var(--muted); opacity: 0.4; }
+/* Busy: an actual spinner — a pulsing dot didn't read as "working". */
+.tab-spin { flex-shrink: 0; width: 13px; height: 13px; border-radius: 50%; border: 2px solid rgba(105, 219, 124, 0.25); border-top-color: #69db7c; animation: tabspin 0.9s linear infinite; }
+@keyframes tabspin { to { transform: rotate(360deg); } }
+:root[data-theme="light"] .tab-spin { border-color: rgba(22, 163, 74, 0.25); border-top-color: #16a34a; }
+/* The tool in flight, flashing softly beside the name while it runs. */
+.tab-tool { margin-left: auto; flex-shrink: 0; max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; font-weight: 800; color: #69db7c; background: rgba(105, 219, 124, 0.1); border-radius: 7px; padding: 2px 8px; animation: toolflash 1.1s ease-in-out infinite; }
+@keyframes toolflash { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+:root[data-theme="light"] .tab-tool { color: #16a34a; background: rgba(22, 163, 74, 0.1); }
 /* Amber attention glyphs: ⚠ approval, ? question, ▤ plan awaiting review. */
-.tab-sig { flex-shrink: 0; width: 11px; text-align: center; font-size: 10px; font-weight: 800; line-height: 1; color: #ffc700; animation: livePulse 1.6s infinite; }
+.tab-sig { flex-shrink: 0; width: 15px; text-align: center; font-size: 13px; font-weight: 800; line-height: 1; color: #ffc700; animation: livePulse 1.6s infinite; }
 :root[data-theme="light"] .tab-sig { color: #b45309; }
 .tab-x { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 11px; opacity: 0.55; padding: 0 2px; }
 .tab-x:hover { opacity: 1; color: #ff8c8c; }
 /* Left (vertical) tabs: name fills the row so ✕ is right-aligned, and ✕ only shows on hover. */
 .tabbar.left .tab-name { flex: 1; min-width: 0; max-width: none; }
-.tabbar.left .tab-x { opacity: 0; transition: opacity 0.12s; }
+/* The rail's ✕ is hover-only, and must not RESERVE space while invisible —
+   it floats over the right edge instead, so chips/dots can sit flush right. */
+.tabbar.left .tab { position: relative; }
+.tabbar.left .tab-x { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); opacity: 0; transition: opacity 0.12s; }
 .tabbar.left .tab:hover .tab-x { opacity: 0.6; }
 .tabbar.left .tab:hover .tab-x:hover { opacity: 1; }
+.tabbar.left .tab:hover .tab-tool { opacity: 0; }
 .tab-new { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 16px; padding: 0 12px; align-self: center; }
 .tab-new:hover { color: var(--accent); }
 /* Left-rail session actions: two labeled buttons side by side. */
@@ -478,8 +490,9 @@ html, body, #root {
 .tcard-match { background: #574a23; color: #ffd479; border-radius: 8px; padding: 1px 8px; font-size: 10.5px; flex-shrink: 0; }
 
 /* ── Tab rename + browser delete ──────────────────────────────────── */
-.tab-rename { display: inline-flex; }
-.tab-rename input { width: 130px; background: var(--panel-2); color: var(--text); border: 1px solid var(--accent); border-radius: 6px; padding: 2px 6px; font: inherit; font-size: 12px; }
+/* Fill the tab: fixed 130px left a dead gap in the (resizable) left rail. */
+.tab-rename { display: inline-flex; flex: 1; min-width: 0; }
+.tab-rename input { flex: 1; width: 100%; min-width: 130px; background: var(--panel-2); color: var(--text); border: 1px solid var(--accent); border-radius: 6px; padding: 2px 6px; font: inherit; font-size: 12px; }
 .sess-act.danger { color: #ff6b6b; border-color: #5e2c2c; font-size: 10.5px; font-weight: 700; }
 
 /* ── Accent picker ────────────────────────────────────────────────── */

@@ -9,7 +9,7 @@ import changelogRaw from "../CHANGELOG.md?raw";
 import TerminalPane from "./TerminalPane.jsx";
 import SettingsModal from "./SettingsModal.jsx";
 import SessionBrowser from "./SessionBrowser.jsx";
-import Dashboard, { statusFor } from "./Dashboard.jsx";
+import Dashboard, { statusFor, sessionFullAutonomy } from "./Dashboard.jsx";
 import { useUpdateStatus, installUpdate, dismissUpdate } from "./updater.js";
 import Background from "./Background.jsx";
 import DiffView from "./DiffView.jsx";
@@ -1375,19 +1375,21 @@ export default function App() {
     }
   }
 
-  // A session likely "needs attention" when its last activity was a tool call
-  // and the stream has gone quiet — typically Claude waiting for an approval
-  // in the terminal. Heuristic, so it's a hint, not an alarm.
+  // One status per tab, from the same statusFor that drives Mission Control —
+  // so the tab dots, the fleet chip and the dashboard can never disagree.
+  function tabStatus(t) {
+    const sess = dash?.sessions?.[t.sessionId];
+    return statusFor(sess?.stats, !!busyById[t.id], sess?.ready, { fullAutonomy: sessionFullAutonomy(t) });
+  }
   function tabAttention(id) {
-    const msgs = convos[id]?.messages;
-    const last = msgs && msgs[msgs.length - 1];
-    return !!last && last.kind === "toolcall" && !busyById[id];
+    const t = tabs.find((x) => x.id === id);
+    return !!t && tabStatus(t).key === "attention";
   }
 
   // Fleet aggregates for the top-bar chip: how many sessions are running,
   // streaming, waiting on the human, and how many subagents are live.
-  const fleetWorking = tabs.filter((t) => busyById[t.id]).length;
-  const fleetNeeds = tabs.filter((t) => tabAttention(t.id)).length;
+  const fleetWorking = tabs.filter((t) => tabStatus(t).key === "working").length;
+  const fleetNeeds = tabs.filter((t) => tabStatus(t).key === "attention").length;
   const fleetAgents = tabs.reduce(
     (a, t) => a + ((dash?.sessions?.[t.sessionId]?.stats?.agents || []).filter((x) => !x.done).length),
     0
@@ -1399,7 +1401,7 @@ export default function App() {
     const name = grouped ? t.title || `session ${t.dupSeq || 1}` : tabDisplayName(t);
     // Always-on status indicator (same derivation as Mission Control).
     const sess = dash?.sessions?.[t.sessionId];
-    const st = statusFor(sess?.stats, !!busyById[t.id], sess?.ready);
+    const st = tabStatus(t);
     return (
           <div
             key={t.id}
@@ -1419,7 +1421,7 @@ export default function App() {
                 {{ toolcall: "⚠", question: "?", plan: "▤" }[sess?.stats?.lastKind] || "⚠"}
               </span>
             ) : st.key === "working" ? (
-              <span className="tab-dot working" title={st.hint} />
+              <span className="tab-spin" title={st.hint} />
             ) : t.id !== activeTab.id && newById[t.id] ? (
               <span className="tab-dot" title="New activity" />
             ) : (
@@ -1438,6 +1440,11 @@ export default function App() {
               </form>
             ) : (
               <span className="tab-name">{name}</span>
+            )}
+            {st.key === "working" && sess?.stats?.lastKind === "toolcall" && sess.stats.lastActivity && renamingTab !== t.id && (
+              <span className="tab-tool" title={sess.stats.lastActivity}>
+                {sess.stats.lastActivity.split(" · ")[0].replace(/^⑂ /, "")}
+              </span>
             )}
             <button className="tab-x" onClick={(e) => { e.stopPropagation(); setCloseAction("keep"); setConfirmCloseId(t.id); }} title="Close session">✕</button>
           </div>

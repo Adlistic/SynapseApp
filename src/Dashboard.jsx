@@ -85,14 +85,42 @@ function shortModel(m) {
 }
 
 
-// Status derivation — same heuristic family as the tab-bar dot: streaming =
-// working; a quiet stream whose last activity is a tool call / question / plan
-// = probably needs the human. Exported so the tab bar shows the same truth.
-export function statusFor(s, busy, ready) {
+/** Sessions launched with --dangerously-skip-permissions can never be waiting
+ *  on an approval prompt — there aren't any. */
+export function sessionFullAutonomy(t) {
+  return !!t?.command && t.command.includes("--dangerously-skip-permissions");
+}
+
+// Status derivation, shared by the tab bar, the fleet chip and Mission
+// Control so they can never disagree. Streaming = working — but a QUIET
+// stream is not automatically "needs you":
+//   - last entry a thinking block → mid-response, still working;
+//   - last entry a tool call with no result → the tool is most likely still
+//     RUNNING. It only degrades to "waiting?" after a grace window — and in a
+//     full-autonomy session never does (no approval prompts exist), though a
+//     very stale one falls back to idle (an interrupted run, most likely).
+export function statusFor(s, busy, ready, opts = {}) {
+  const { fullAutonomy = false, now = Date.now() } = opts;
   if (busy) return { key: "working", label: "working", hint: "Streaming new activity right now" };
   if (!ready || !s || !s.lastTsMs) return { key: "idle", label: "starting…", hint: "No transcript activity yet" };
-  if (s.lastKind === "toolcall")
-    return { key: "attention", label: "waiting?", hint: "Last activity is a tool call with no result — Claude may be waiting for an approval in the terminal" };
+  const quiet = now - s.lastTsMs;
+  if (s.lastKind === "thinking" && quiet < 120_000)
+    return { key: "working", label: "thinking", hint: "Mid-response — the last transcript entry is a thinking block" };
+  // Between a tool result (or a fresh prompt) and the next assistant entry the
+  // model is computing — the transcript is quiet but the session is mid-turn,
+  // not idle. Generous window: extended thinking stretches these gaps.
+  if ((s.lastKind === "toolresult" || s.lastKind === "user") && quiet < 180_000)
+    return { key: "working", label: "working", hint: "Mid-turn — Claude is composing its next step" };
+  if (s.lastKind === "toolcall") {
+    if (fullAutonomy) {
+      if (quiet < 30 * 60_000)
+        return { key: "working", label: "running tool", hint: "A tool call is in flight — this session runs with full autonomy, so nothing can be waiting on an approval" };
+      return { key: "idle", label: "idle", hint: "A tool call never returned — the session may have been interrupted" };
+    }
+    if (quiet < 45_000)
+      return { key: "working", label: "running tool", hint: "A tool call is in flight — if it stays quiet much longer it may be waiting for your approval" };
+    return { key: "attention", label: "waiting?", hint: "A tool call has had no result for a while — Claude may be waiting for an approval in the terminal" };
+  }
   if (s.lastKind === "question")
     return { key: "attention", label: "asked you", hint: "Claude's last message is a question for you" };
   if (s.lastKind === "plan")
@@ -191,7 +219,7 @@ function PlanRow({ todos }) {
 function SessionCard({ t, sess, busy, now, color, onJump }) {
   const s = sess?.stats;
   const usage = sess?.usage;
-  const st = statusFor(s, busy, sess?.ready);
+  const st = statusFor(s, busy, sess?.ready, { fullAutonomy: sessionFullAutonomy(t), now });
   const cost = estCost(s?.models);
   const ctx = s?.contextTokens || 0;
   const win = ctxWindowFor(s?.lastModel);
@@ -319,8 +347,8 @@ export default function Dashboard({ tabs, dash, busyById, rateLimits, onJump, on
     }
     return [...by.values()];
   }, [rows]);
-  const working = rows.filter((r) => r.busy);
-  const attention = rows.filter((r) => statusFor(r.sess?.stats, r.busy, r.sess?.ready).key === "attention");
+  const working = rows.filter((r) => statusFor(r.sess?.stats, r.busy, r.sess?.ready, { fullAutonomy: sessionFullAutonomy(r.t), now }).key === "working");
+  const attention = rows.filter((r) => statusFor(r.sess?.stats, r.busy, r.sess?.ready, { fullAutonomy: sessionFullAutonomy(r.t), now }).key === "attention");
   const agentsLive = rows.reduce((a, r) => a + (r.sess?.stats?.agents || []).filter((x) => !x.done).length, 0);
   const totals = rows.reduce(
     (acc, r) => {
@@ -372,7 +400,7 @@ export default function Dashboard({ tabs, dash, busyById, rateLimits, onJump, on
         {attention.length > 0 && (
           <div className="dash-attn">
             {attention.map(({ t, sess, busy }) => {
-              const st = statusFor(sess?.stats, busy, sess?.ready);
+              const st = statusFor(sess?.stats, busy, sess?.ready, { fullAutonomy: sessionFullAutonomy(t), now });
               return (
                 <button key={t.id} className="dash-attn-row" onClick={() => onJump(t.id)}>
                   <span className="dash-dot attention" />
@@ -390,8 +418,8 @@ export default function Dashboard({ tabs, dash, busyById, rateLimits, onJump, on
         ) : (
           groups.map((g) => {
             const color = projectColor(g.root);
-            const gWork = g.rows.filter((r) => r.busy).length;
-            const gNeed = g.rows.filter((r) => statusFor(r.sess?.stats, r.busy, r.sess?.ready).key === "attention").length;
+            const gWork = g.rows.filter((r) => statusFor(r.sess?.stats, r.busy, r.sess?.ready, { fullAutonomy: sessionFullAutonomy(r.t), now }).key === "working").length;
+            const gNeed = g.rows.filter((r) => statusFor(r.sess?.stats, r.busy, r.sess?.ready, { fullAutonomy: sessionFullAutonomy(r.t), now }).key === "attention").length;
             const gTot = g.rows.reduce(
               (acc, r) => {
                 const u = r.sess?.usage || {};

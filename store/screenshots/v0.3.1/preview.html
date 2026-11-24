@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Store Screenshots Preview</title>
+<style>
+  :root {
+    --bg: #f4f6fb; --panel: #ffffff; --text: #101a2e; --muted: #5a6781; --border: #dbe3f0; --accent: #1e73e8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg: #0b1120; --panel: #121a2e; --text: #d9e4ff; --muted: #8a96b0; --border: #243353; --accent: #4f9bff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 "Segoe UI", system-ui, sans-serif; }
+  main { max-width: 1180px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 18px; margin: 40px 0 6px; }
+  p.lead, p.note { color: var(--muted); margin: 0 0 16px; max-width: 760px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .card img { width: 100%; display: block; aspect-ratio: 16 / 9; object-fit: cover; }
+  .card .meta { padding: 10px 12px 12px; }
+  .card .name { font-weight: 700; }
+  .card .sub { color: var(--muted); font-size: 13px; }
+  .tag { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; background: var(--accent); color: #fff; margin-left: 6px; vertical-align: 2px; }
+  .gallery { display: grid; gap: 28px; }
+  figure { margin: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
+  figure img { width: 100%; display: block; cursor: zoom-in; }
+  figcaption { padding: 12px 16px 14px; display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+  figcaption .n { font-weight: 800; color: var(--accent); }
+  figcaption .what { font-weight: 700; }
+  figcaption .why { color: var(--muted); }
+  dialog { padding: 0; border: none; background: transparent; max-width: 96vw; }
+  dialog::backdrop { background: rgba(4, 8, 18, .85); }
+  dialog img { max-width: 96vw; max-height: 92vh; display: block; border-radius: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>HyperVoice Code — Store screenshots (v0.3.1)</h1>
+  <p class="lead">Eight 1920×1080 images, in the order they'd appear on the listing. The first one is what the Store shows on search results and app tiles. All app content is a made-up demo (fictional projects and files), not real work. Click any image to see it full size.</p>
+
+  <h2>How it looks next to HyperVoice in search results</h2>
+  <p class="note">Search-result size, roughly what people see before they click.</p>
+  <div class="cards">
+    <div class="card"><img src="_hypervoice-hero.png" alt="HyperVoice store thumbnail"><div class="meta"><div class="name">HyperVoice - Voice to Text &amp; Dictation</div><div class="sub">Productivity · Free</div></div></div>
+    <div class="card"><img src="1-hero.png" alt="HyperVoice Code store thumbnail"><div class="meta"><div class="name">HyperVoice Code <span class="tag">new</span></div><div class="sub">Developer tools · Free</div></div></div>
+    <div class="card"><img src="../hvcode-1.png" alt="Current HyperVoice Code thumbnail"><div class="meta"><div class="name">HyperVoice Code — current (0.3.0)</div><div class="sub">What the listing shows today</div></div></div>
+  </div>
+
+  <h2>All eight, in listing order</h2>
+  <div class="gallery">
+    <figure><img src="1-hero.png" alt="Claude Code, made readable"><figcaption><span class="n">1</span><span class="what">Claude Code, made readable</span><span class="why">The thumbnail. Whole app: terminal, reader, a diff, four sessions in the rail.</span></figcaption></figure>
+    <figure><img src="2-answer.png" alt="The answer, not the log"><figcaption><span class="n">2</span><span class="what">The answer, not the log</span><span class="why">Answer view in the light theme.</span></figcaption></figure>
+    <figure><img src="3-files.png" alt="Every change, in one place"><figcaption><span class="n">3</span><span class="what">Every change, in one place</span><span class="why">“3 files changed” opened, with the diff.</span></figcaption></figure>
+    <figure><img src="4-ask.png" alt="Answer Claude in one click"><figcaption><span class="n">4</span><span class="what">Answer Claude in one click</span><span class="why">A multiple-choice question as a card.</span></figcaption></figure>
+    <figure><img src="5-mission.png" alt="Every session. Nothing missed."><figcaption><span class="n">5</span><span class="what">Every session. Nothing missed.</span><span class="why">Mission Control: working, asked you, agent running.</span></figcaption></figure>
+    <figure><img src="6-resume.png" alt="Pick up any session"><figcaption><span class="n">6</span><span class="what">Pick up any session</span><span class="why">Session browser grouped by project.</span></figcaption></figure>
+    <figure><img src="7-talk.png" alt="Talk instead of typing"><figcaption><span class="n">7</span><span class="what">Talk instead of typing</span><span class="why">HyperVoice card + a dictated prompt in the composer.</span></figcaption></figure>
+    <figure><img src="8-settings.png" alt="Make it yours"><figcaption><span class="n">8</span><span class="what">Make it yours</span><span class="why">Theme and the new text-size controls.</span></figcaption></figure>
+  </div>
+</main>
+<dialog id="zoom"><img alt=""></dialog>
+<script>
+  const d = document.getElementById("zoom"), di = d.querySelector("img");
+  document.querySelectorAll("figure img, .card img").forEach((im) => im.addEventListener("click", () => { di.src = im.src; di.alt = im.alt; d.showModal(); }));
+  d.addEventListener("click", () => d.close());
+</script>
+</body>
+</html>

@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { loadTitles, saveTitle } from "./filters.js";
+import Orb from "./visuals/Orb.jsx";
+import { loadTitles, saveTitle, normRoot } from "./filters.js";
+import { AGENTS, agentOf, availability, lastPermMode, useAgentStatus } from "./agents.js";
+import PermModePicker from "./PermModePicker.jsx";
 
 function fmtTime(ms) {
   if (!ms) return "";
@@ -13,10 +16,32 @@ function fmtSize(b) {
   return b + " B";
 }
 
-// Browse every Claude Code session on this machine (scanned from
-// ~/.claude/projects), search across transcripts, rename, and resume one.
-export default function SessionBrowser({ onResume, onClose }) {
+// Claude Code and Codex group sessions their own way; show one group per
+// folder with both kinds in it, newest activity first.
+function mergeGroups(lists) {
+  const by = new Map();
+  for (const g of lists.flat()) {
+    const key = normRoot(g.cwd) || g.dir;
+    if (!by.has(key)) by.set(key, { dir: key, cwd: g.cwd, sessions: [] });
+    by.get(key).sessions.push(...g.sessions);
+  }
+  const out = [...by.values()];
+  for (const g of out) g.sessions.sort((a, b) => b.modifiedMs - a.modifiedMs);
+  out.sort((a, b) => (b.sessions[0]?.modifiedMs || 0) - (a.sessions[0]?.modifiedMs || 0));
+  return out;
+}
+
+// Browse every Claude Code and Codex session on this machine (scanned from
+// ~/.claude/projects and ~/.codex/sessions), search across them, rename, and
+// resume one in the tool it was made with.
+export default function SessionBrowser({ onResume, onClose, filters }) {
   const [projects, setProjects] = useState(null);
+  const [only, setOnly] = useState("all"); // "all" | "claude" | "codex"
+  // Which agents are installed: a session whose tool is missing is greyed
+  // out with the reason, instead of opening a terminal that can't run it.
+  const status = useAgentStatus();
+  const missing = (s) => availability(status, agentOf(s)) === "missing";
+  const getIt = (s) => invoke("open_external", { url: AGENTS[agentOf(s)].installUrl }).catch(() => {});
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState(null); // null = not searching
   const [searching, setSearching] = useState(false);
@@ -26,6 +51,8 @@ export default function SessionBrowser({ onResume, onClose }) {
   const [renameVal, setRenameVal] = useState("");
   const [confirmDel, setConfirmDel] = useState(null); // sessionId pending delete
   const [error, setError] = useState("");
+  // Mode to resume in, per agent; starts on the one used last.
+  const [modes, setModes] = useState(() => ({ claude: lastPermMode(filters, "claude"), codex: lastPermMode(filters, "codex") }));
 
   // Two-step delete: 🗑 → "sure?" → gone (removed from disk and the lists).
   async function deleteSession(s) {
@@ -44,7 +71,10 @@ export default function SessionBrowser({ onResume, onClose }) {
   }
 
   useEffect(() => {
-    invoke("list_claude_sessions").then(setProjects).catch((e) => setError(String(e)));
+    Promise.all([
+      invoke("list_claude_sessions").catch((e) => { setError(String(e)); return []; }),
+      invoke("list_codex_sessions").catch(() => []),
+    ]).then((lists) => setProjects(mergeGroups(lists)));
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -68,12 +98,21 @@ export default function SessionBrowser({ onResume, onClose }) {
     setRenaming(null);
   }
 
+  // Both kinds on this PC → badges on rows and a filter; otherwise neither.
+  const kinds = new Set([...(projects || []).flatMap((p) => p.sessions.map(agentOf)), ...(hits || []).map(agentOf)]);
+  const mixed = kinds.size > 1;
+  const keep = (s) => only === "all" || agentOf(s) === only;
+  const shown = (projects || [])
+    .map((p) => ({ ...p, sessions: p.sessions.filter(keep) }))
+    .filter((p) => p.sessions.length > 0);
+
   const row = (s) => (
-    <div key={s.sessionId} className="sess-row">
+    <div key={s.sessionId} className={"sess-row" + (missing(s) ? " unavailable" : "")}>
       {renaming === s.sessionId ? (
         <form className="sess-rename" onSubmit={(e) => { e.preventDefault(); commitRename(s.sessionId); }}>
           <input
             autoFocus
+            onFocus={(e) => e.target.select()}
             value={renameVal}
             onChange={(e) => setRenameVal(e.target.value)}
             placeholder={s.title}
@@ -83,8 +122,11 @@ export default function SessionBrowser({ onResume, onClose }) {
       ) : (
         <button
           className="sess-main"
-          onClick={() => onResume(s, titles[s.sessionId] || s.title)}
-          title={`${s.cwd || "?"}\n${s.sessionId}\nClick to resume this session`}
+          onClick={() => !missing(s) && onResume(s, titles[s.sessionId] || s.title, modes[agentOf(s)])}
+          aria-disabled={missing(s) || undefined}
+          title={missing(s)
+            ? `${AGENTS[agentOf(s)].name} isn't installed on this PC, so this session can't be reopened. Install it to resume it.`
+            : `${s.cwd || "?"}\n${AGENTS[agentOf(s)].name} · ${s.sessionId}\nClick to resume this session`}
         >
           <span className="sess-title">{titles[s.sessionId] || s.title}</span>
           <span className="sess-meta">
@@ -92,6 +134,15 @@ export default function SessionBrowser({ onResume, onClose }) {
             {s.matchCount ? ` · ${s.matchCount} match(es)` : ""}
           </span>
           {s.snippet && <span className="sess-snippet">…{s.snippet}…</span>}
+          {missing(s) && (
+            <span className="sess-why">Can't reopen: {AGENTS[agentOf(s)].name} isn't installed on this PC.</span>
+          )}
+        </button>
+      )}
+      {mixed && <span className="sess-agent" title={`${AGENTS[agentOf(s)].name} session`}>{AGENTS[agentOf(s)].short}</span>}
+      {missing(s) && (
+        <button className="sess-act sess-get" onClick={() => getIt(s)} title={`How to install ${AGENTS[agentOf(s)].name} (opens in your browser)`}>
+          Get {AGENTS[agentOf(s)].short} ↗
         </button>
       )}
       <button
@@ -101,7 +152,10 @@ export default function SessionBrowser({ onResume, onClose }) {
       >
         ✎
       </button>
-      {confirmDel === s.sessionId ? (
+      {agentOf(s) === "codex" ? (
+        // Codex keeps its own index of sessions; delete them in Codex (`codex delete <id>`).
+        <span className="sess-act sess-act-none" aria-hidden="true">🗑</span>
+      ) : confirmDel === s.sessionId ? (
         <button
           className="sess-act danger"
           title="Click again to permanently delete this transcript"
@@ -136,23 +190,38 @@ export default function SessionBrowser({ onResume, onClose }) {
           />
           <button className="tab-x" onClick={onClose} title="Close">✕</button>
         </div>
+        <div className="browser-perm">
+          {[...kinds].filter((k) => !mixed || only === "all" || only === k).sort().map((k) => (
+            <div key={k}>
+              <span className="browser-perm-label">{mixed ? `Resume ${AGENTS[k].name} sessions with` : "Resume with"}</span>
+              <PermModePicker variant="cards" agent={k} value={modes[k]} label={`Permissions for resumed ${AGENTS[k].name} sessions`} onChange={(v) => setModes((m) => ({ ...m, [k]: v }))} />
+            </div>
+          ))}
+        </div>
         <div className="browser-body">
           {error && <div className="error">{error}</div>}
-          {searching && <div className="empty">Searching…</div>}
+          {searching && <div className="empty orb-wait" role="status" aria-live="polite"><Orb mode="searching" size={180} reactive={false} /><span>Searching every transcript…</span></div>}
 
+          {mixed && (
+            <div className="browser-chips" role="group" aria-label="Show sessions from">
+              {[["all", "All"], ["claude", "Claude Code"], ["codex", "Codex"]].map(([k, l]) => (
+                <button key={k} aria-pressed={only === k} className={"browser-chip" + (only === k ? " on" : "")} onClick={() => setOnly(k)}>{l}</button>
+              ))}
+            </div>
+          )}
           {hits !== null && !searching && (
             <>
-              {hits.length === 0 && <div className="empty">No transcripts mention “{query.trim()}”.</div>}
-              {hits.map((h) => row(h))}
+              {hits.filter(keep).length === 0 && <div className="empty">No transcripts mention “{query.trim()}”.</div>}
+              {hits.filter(keep).map((h) => row(h))}
             </>
           )}
 
-          {hits === null && projects === null && <div className="empty">Scanning ~/.claude/projects…</div>}
+          {hits === null && projects === null && <div className="empty orb-wait" role="status" aria-live="polite"><Orb mode="searching" size={180} reactive={false} /><span>Looking for sessions…</span></div>}
           {hits === null && projects !== null && projects.length === 0 && (
-            <div className="empty">No Claude Code sessions found on this machine yet.</div>
+            <div className="empty">No Claude Code or Codex sessions found on this machine yet.</div>
           )}
           {hits === null &&
-            (projects || []).map((p) => {
+            shown.map((p) => {
               const open = openDirs[p.dir] === true; // collapsed by default
               return (
                 <div key={p.dir} className="proj-group">
@@ -169,7 +238,7 @@ export default function SessionBrowser({ onResume, onClose }) {
               );
             })}
         </div>
-        <div className="browser-foot">Click a session to resume it in a new tab (terminal runs <code>claude --resume</code>).</div>
+        <div className="browser-foot">Click a session to resume it in a new tab — it reopens in the tool it was made with (<code>claude --resume</code> or <code>codex resume</code>).</div>
       </div>
     </div>
   );

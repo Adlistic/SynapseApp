@@ -114,6 +114,23 @@ pub struct Message {
     /// diff. Shape varies per tool; the redactor walks it recursively.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edit_data: Option<Value>,
+    /// The raw tool input, kept only for tools the reader renders in full
+    /// (AskUserQuestion: the questions and their options).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<Value>,
+    /// Wall-clock time of the transcript entry (epoch ms), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<i64>,
+    /// A prompt the user sent while Claude was mid-turn (Claude Code hands it
+    /// to the model inside the running turn rather than as a new one).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mid_turn: bool,
+    /// The plain-English line Claude wrote for this tool call (Bash's
+    /// `description`: "Seeing whether the to-do panel links interview prep").
+    /// Shown instead of the raw command where people read; the command stays
+    /// in `text`. None when the call has no description (Codex, most tools).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desc: Option<String>,
 }
 
 /// Lifecycle status of an agent.

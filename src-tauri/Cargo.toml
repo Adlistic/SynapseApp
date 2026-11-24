@@ -1,12 +1,12 @@
 [package]
-name = "synapse2-desktop"
-version = "0.2.12"
+name = "hypervoice-code"
+version = "0.3.3"
 edition = "2021"
-description = "Synapse — Claude Code Workspace"
+description = "HyperVoice Code — a workspace for Claude Code and Codex"
 authors = ["Chris Cousens"]
 
 [lib]
-name = "synapse_desktop_lib"
+name = "hypervoice_code_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -38,6 +38,9 @@ tauri-plugin-notification = "2"
 tauri-plugin-window-state = "2"
 # The app-owned updater's periodic check loop (updater.rs) sleeps on tokio time.
 tokio = { version = "1", features = ["time"] }
+# Reads Codex CLI session files, which Codex compresses (zstd) once a session
+# is closed. Pure Rust: no C toolchain needed.
+ruzstd = "0.8"
 
 [profile.release]
 opt-level = "s"

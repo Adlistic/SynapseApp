@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { TOOL_CATS, baseNameOf, normRoot, projectColor, tabDisplayName } from "./filters.js";
+import { agentInfo, agentOf } from "./agents.js";
+import StatusGlyph, { glyphKind } from "./StatusGlyph.jsx";
 
 // Mission Control — a live fleet view over every open session. Everything here
 // renders from the backend's `get_dashboard` snapshot (tailer cache, no file
@@ -53,7 +55,7 @@ const PRICES = [
   { key: "sonnet", inTok: 3, outTok: 15 },
   { key: "haiku", inTok: 1, outTok: 5 },
 ];
-function estCost(models) {
+export function estCost(models) {
   let usd = 0;
   let unknown = false;
   for (const [id, u] of Object.entries(models || {})) {
@@ -71,14 +73,17 @@ function estCost(models) {
   }
   return { usd, unknown };
 }
-function fmtCost({ usd, unknown }) {
+export function fmtCost({ usd, unknown }) {
   if (usd <= 0) return unknown ? "?" : "$0";
   const s = usd >= 10 ? `$${usd.toFixed(0)}` : usd >= 0.1 ? `$${usd.toFixed(2)}` : "<$0.10";
   return `~${s}${unknown ? "+" : ""}`;
 }
 
-export function ctxWindowFor(model) {
-  return model && model.includes("[1m]") ? 1_000_000 : 200_000;
+// Transcripts don't say which window a session runs with; a context already
+// past 200k can only be the 1M one.
+export function ctxWindowFor(model, used = 0, known = 0) {
+  if (known > 0) return known; // Codex reports its window
+  return (model && model.includes("[1m]")) || used > 200_000 ? 1_000_000 : 200_000;
 }
 function shortModel(m) {
   return (m || "").replace(/^claude-/, "").replace(/-\d{8}$/, "");
@@ -88,7 +93,7 @@ function shortModel(m) {
 /** Sessions launched with --dangerously-skip-permissions can never be waiting
  *  on an approval prompt — there aren't any. */
 export function sessionFullAutonomy(t) {
-  return !!t?.command && t.command.includes("--dangerously-skip-permissions");
+  return !!t?.command && (t.command.includes("--dangerously-skip-permissions") || t.command.includes("--dangerously-bypass-approvals-and-sandbox"));
 }
 
 // Status derivation, shared by the tab bar, the fleet chip and Mission
@@ -99,10 +104,48 @@ export function sessionFullAutonomy(t) {
 //     RUNNING. It only degrades to "waiting?" after a grace window — and in a
 //     full-autonomy session never does (no approval prompts exist), though a
 //     very stale one falls back to idle (an interrupted run, most likely).
+// What the bottom of a session's terminal says Claude Code is doing:
+// "prompt" (a permission prompt is showing), "running" (its timer/spinner is
+// ticking, so a step is in flight), or null when it can't tell.
+export function readScreen(text) {
+  if (!text) return null;
+  if (/Do you want to\b[^\n]*\?/i.test(text) && /(^|\n)[\s│❯>]*1\.\s+Yes\b/.test(text)) return "prompt";
+  // Codex's approval questions (codex-rs/tui approval_overlay).
+  if (/Would you like to (run the following command|make the following edits|grant these permissions)\?|Do you want to approve network access/i.test(text)) return "prompt";
+  if (/esc to interrupt|ctrl\+b to run in background|…\s*\(\d+(m \d+)?s\b/i.test(text)) return "running";
+  return null;
+}
+
 export function statusFor(s, busy, ready, opts = {}) {
-  const { fullAutonomy = false, now = Date.now() } = opts;
+  // Hints name the session's own agent.
+  const name = agentInfo(opts.agent || "claude").short;
+  const r = statusCore(s, busy, ready, opts);
+  return name === "Claude" ? r : { ...r, hint: r.hint.replace(/Claude/g, name) };
+}
+
+function statusCore(s, busy, ready, opts) {
+  const { fullAutonomy = false, now = Date.now(), background = 0, screen = null, agent = "claude" } = opts;
+  // A permission prompt on screen is certain, whatever the transcript says.
+  if (screen === "prompt")
+    return { key: "attention", label: "needs approval", hint: "The terminal is showing a permission prompt — Claude is waiting for your answer" };
   if (busy) return { key: "working", label: "working", hint: "Streaming new activity right now" };
+  // A subagent mid-run (its Task call has no result yet): the main transcript
+  // is quiet, but Claude is working, not waiting on you.
+  if (s?.agents?.some((a) => !a.done))
+    return { key: "working", label: "agent running", hint: "A subagent is working on part of this turn" };
+  // A new Codex session has no file until its first prompt is sent.
+  if (agent === "codex" && !ready) return { key: "idle", label: "ready", hint: "Waiting for your first prompt" };
   if (!ready || !s || !s.lastTsMs) return { key: "idle", label: "starting…", hint: "No transcript activity yet" };
+  // Codex logs when each turn starts and ends, so its state is known exactly.
+  if (s.turnOpen === true) {
+    if (screen === "running" || now - s.lastTsMs < 30 * 60_000)
+      return { key: "working", label: s.lastKind === "toolcall" ? "running tool" : "working", hint: "Codex is working on this turn" };
+    return { key: "idle", label: "idle", hint: "A turn never finished — the session may have been interrupted" };
+  }
+  if (s.turnOpen === false) {
+    if (s.lastKind === "question") return { key: "attention", label: "asked you", hint: "Codex's last message is a question for you" };
+    return { key: "idle", label: "idle", hint: "Waiting for your next prompt" };
+  }
   const quiet = now - s.lastTsMs;
   if (s.lastKind === "thinking" && quiet < 120_000)
     return { key: "working", label: "thinking", hint: "Mid-response — the last transcript entry is a thinking block" };
@@ -112,6 +155,14 @@ export function statusFor(s, busy, ready, opts = {}) {
   if ((s.lastKind === "toolresult" || s.lastKind === "user") && quiet < 180_000)
     return { key: "working", label: "working", hint: "Mid-turn — Claude is composing its next step" };
   if (s.lastKind === "toolcall") {
+    // A multiple-choice question is waiting on you from the moment it is asked
+    // (in every mode: full autonomy skips approvals, not questions).
+    if ((s.lastActivity || "").replace(/^⑂ /, "").startsWith("AskUserQuestion"))
+      return { key: "attention", label: "asked you", hint: "Claude asked you a question and is waiting for your answer" };
+    // The terminal shows the step's timer still running: it is working, however
+    // long it takes. (A slow build is not a question.)
+    if (screen === "running")
+      return { key: "working", label: "running tool", hint: "A step is still running — its timer is ticking in the terminal" };
     if (fullAutonomy) {
       if (quiet < 30 * 60_000)
         return { key: "working", label: "running tool", hint: "A tool call is in flight — this session runs with full autonomy, so nothing can be waiting on an approval" };
@@ -125,6 +176,8 @@ export function statusFor(s, busy, ready, opts = {}) {
     return { key: "attention", label: "asked you", hint: "Claude's last message is a question for you" };
   if (s.lastKind === "plan")
     return { key: "attention", label: "plan ready", hint: "A plan is awaiting your approval" };
+  if (background > 0)
+    return { key: "working", label: background === 1 ? "1 in background" : `${background} in background`, hint: "Agents or commands Claude started are still running in the background" };
   return { key: "idle", label: "idle", hint: "Waiting for your next prompt" };
 }
 
@@ -216,13 +269,14 @@ function PlanRow({ todos }) {
  * tooltips (cwd on the name, category mix on the tools count, cost detail
  * on the tokens stat) so the card reads in one pass.
  */
-function SessionCard({ t, sess, busy, now, color, onJump }) {
+function SessionCard({ t, sess, busy, now, color, onJump, screenFor }) {
   const s = sess?.stats;
   const usage = sess?.usage;
-  const st = statusFor(s, busy, sess?.ready, { fullAutonomy: sessionFullAutonomy(t), now });
-  const cost = estCost(s?.models);
+  const st = statusFor(s, busy, sess?.ready, { fullAutonomy: sessionFullAutonomy(t), now, screen: screenFor?.(t.id), agent: agentOf(t) });
+  // Codex runs on a ChatGPT plan; there's no per-token price to estimate.
+  const cost = agentOf(t) === "codex" ? { usd: 0, unknown: (usage?.input || 0) + (usage?.output || 0) > 0 } : estCost(s?.models);
   const ctx = s?.contextTokens || 0;
-  const win = ctxWindowFor(s?.lastModel);
+  const win = ctxWindowFor(s?.lastModel, ctx, s?.contextWindow);
   const ctxPct = Math.min(100, Math.round((ctx / win) * 100));
   const ctxTier = ctxPct >= 90 ? "red" : ctxPct >= 70 ? "orange" : ctxPct >= 50 ? "gold" : "";
   const inTok = (usage?.input || 0) + (usage?.cacheCreation || 0);
@@ -241,10 +295,10 @@ function SessionCard({ t, sess, busy, now, color, onJump }) {
     >
       <div className="dash-card-head">
         <span className="dash-card-name" title={t.cwd}>{tabDisplayName(t)}</span>
-        {t.branch && <span className="dash-chip branch" title={`Worktree branch ${t.branch}`}>⌥ {t.branch.replace(/^synapse2\//, "")}</span>}
+        {t.branch && <span className="dash-chip branch" title={`Worktree branch ${t.branch}`}>⌥ {t.branch.replace(/^(hvcode|synapse2)\//, "")}</span>}
         {s?.lastModel && <span className="dash-chip model">{shortModel(s.lastModel)}</span>}
-        <span className={"dash-status-pill " + st.key} title={st.hint}>
-          <span className={"dash-dot " + st.key} />
+        <span className={"dash-status-pill " + st.key + " k-" + glyphKind(st, { lastKind: s?.lastKind })} title={st.hint}>
+          <StatusGlyph kind={glyphKind(st, { lastKind: s?.lastKind })} size={13} />
           {st.label}
         </span>
       </div>
@@ -319,7 +373,7 @@ function LimitTile({ icon, label, win }) {
   );
 }
 
-export default function Dashboard({ tabs, dash, busyById, rateLimits, onJump, onClose }) {
+export default function Dashboard({ tabs, dash, busyById, rateLimits, onJump, onClose, screenFor }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 3000);
@@ -347,15 +401,15 @@ export default function Dashboard({ tabs, dash, busyById, rateLimits, onJump, on
     }
     return [...by.values()];
   }, [rows]);
-  const working = rows.filter((r) => statusFor(r.sess?.stats, r.busy, r.sess?.ready, { fullAutonomy: sessionFullAutonomy(r.t), now }).key === "working");
-  const attention = rows.filter((r) => statusFor(r.sess?.stats, r.busy, r.sess?.ready, { fullAutonomy: sessionFullAutonomy(r.t), now }).key === "attention");
+  const working = rows.filter((r) => statusFor(r.sess?.stats, r.busy, r.sess?.ready, { fullAutonomy: sessionFullAutonomy(r.t), now, screen: screenFor?.(r.t.id), agent: agentOf(r.t) }).key === "working");
+  const attention = rows.filter((r) => statusFor(r.sess?.stats, r.busy, r.sess?.ready, { fullAutonomy: sessionFullAutonomy(r.t), now, screen: screenFor?.(r.t.id), agent: agentOf(r.t) }).key === "attention");
   const agentsLive = rows.reduce((a, r) => a + (r.sess?.stats?.agents || []).filter((x) => !x.done).length, 0);
   const totals = rows.reduce(
     (acc, r) => {
       const u = r.sess?.usage || {};
       acc.inTok += (u.input || 0) + (u.cacheCreation || 0);
       acc.outTok += u.output || 0;
-      const c = estCost(r.sess?.stats?.models);
+      const c = agentOf(r.t) === "codex" ? { usd: 0, unknown: (u.input || 0) + (u.output || 0) > 0 } : estCost(r.sess?.stats?.models);
       acc.usd += c.usd;
       acc.unknown = acc.unknown || c.unknown;
       return acc;
@@ -400,10 +454,10 @@ export default function Dashboard({ tabs, dash, busyById, rateLimits, onJump, on
         {attention.length > 0 && (
           <div className="dash-attn">
             {attention.map(({ t, sess, busy }) => {
-              const st = statusFor(sess?.stats, busy, sess?.ready, { fullAutonomy: sessionFullAutonomy(t), now });
+              const st = statusFor(sess?.stats, busy, sess?.ready, { fullAutonomy: sessionFullAutonomy(t), now, screen: screenFor?.(t.id), agent: agentOf(t) });
               return (
                 <button key={t.id} className="dash-attn-row" onClick={() => onJump(t.id)}>
-                  <span className="dash-dot attention" />
+                  <StatusGlyph kind={glyphKind(st, { lastKind: sess?.stats?.lastKind })} size={13} />
                   <b>{tabDisplayName(t)}</b>
                   <span className="dash-attn-why">{st.hint}</span>
                   <span className="dash-attn-go">go →</span>
@@ -418,14 +472,14 @@ export default function Dashboard({ tabs, dash, busyById, rateLimits, onJump, on
         ) : (
           groups.map((g) => {
             const color = projectColor(g.root);
-            const gWork = g.rows.filter((r) => statusFor(r.sess?.stats, r.busy, r.sess?.ready, { fullAutonomy: sessionFullAutonomy(r.t), now }).key === "working").length;
-            const gNeed = g.rows.filter((r) => statusFor(r.sess?.stats, r.busy, r.sess?.ready, { fullAutonomy: sessionFullAutonomy(r.t), now }).key === "attention").length;
+            const gWork = g.rows.filter((r) => statusFor(r.sess?.stats, r.busy, r.sess?.ready, { fullAutonomy: sessionFullAutonomy(r.t), now, screen: screenFor?.(r.t.id), agent: agentOf(r.t) }).key === "working").length;
+            const gNeed = g.rows.filter((r) => statusFor(r.sess?.stats, r.busy, r.sess?.ready, { fullAutonomy: sessionFullAutonomy(r.t), now, screen: screenFor?.(r.t.id), agent: agentOf(r.t) }).key === "attention").length;
             const gTot = g.rows.reduce(
               (acc, r) => {
                 const u = r.sess?.usage || {};
                 acc.inTok += (u.input || 0) + (u.cacheCreation || 0);
                 acc.outTok += u.output || 0;
-                const c = estCost(r.sess?.stats?.models);
+                const c = agentOf(r.t) === "codex" ? { usd: 0, unknown: (u.input || 0) + (u.output || 0) > 0 } : estCost(r.sess?.stats?.models);
                 acc.usd += c.usd;
                 acc.unknown = acc.unknown || c.unknown;
                 return acc;
@@ -448,7 +502,7 @@ export default function Dashboard({ tabs, dash, busyById, rateLimits, onJump, on
                 )}
                 <div className="dash-grid">
                   {g.rows.map(({ t, sess, busy }) => (
-                    <SessionCard key={t.id} t={t} sess={sess} busy={busy} now={now} color={color} onJump={onJump} />
+                    <SessionCard key={t.id} t={t} sess={sess} busy={busy} now={now} color={color} onJump={onJump} screenFor={screenFor} />
                   ))}
                 </div>
               </div>

@@ -1,19 +1,28 @@
 //! Usage-limit hook management. Claude Code passes rate-limit data
 //! (session/weekly windows) to the user's status-line script on every refresh;
-//! Synapse displays it from a cache file that script writes. This module lets
-//! the app install a minimal hook for users who don't have a status line —
-//! with their consent, from Settings — instead of requiring manual setup.
+//! HyperVoice Code displays it from a cache file that script writes. This
+//! module lets the app install a minimal hook for users who don't have a status
+//! line — with their consent, from Settings — instead of requiring manual setup.
+//!
+//! The app's own folder is `~/.hypervoice-code` (hook script, rate-limit
+//! cache, logs). Before the rename it was `~/.synapse`: a cache written there
+//! by an older hook or a user's own script is still read, and the hook we
+//! installed there is moved over on start-up (`upgrade_legacy_hook`).
 
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use tracing::info;
 
-/// The hook script: caches `rate_limits` for Synapse, prints nothing (no
-/// visible status line). ESM, runs under the user's `node`.
-const HOOK_SCRIPT: &str = r#"// Synapse usage-limit hook (installed from Synapse Settings).
+/// The app's folder in the user's home, and the one it had before the rename.
+pub const APP_DIR: &str = ".hypervoice-code";
+const LEGACY_DIR: &str = ".synapse";
+
+/// The hook script: caches `rate_limits` for HyperVoice Code, prints nothing
+/// (no visible status line). ESM, runs under the user's `node`.
+const HOOK_SCRIPT: &str = r#"// HyperVoice Code usage-limit hook (installed from HyperVoice Code Settings).
 // Claude Code invokes this after each response; it caches the rate-limit
-// windows so Synapse can show session/weekly usage. It prints NOTHING, so no
-// visible status line is added. Safe to delete; reinstall from Synapse.
+// windows so HyperVoice Code can show session/weekly usage. It prints NOTHING,
+// so no visible status line is added. Safe to delete; reinstall from the app.
 import { mkdirSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
@@ -24,7 +33,7 @@ process.stdin.on("end", () => {
   try {
     const data = JSON.parse(input);
     if (data && data.rate_limits) {
-      const dir = join(homedir(), ".synapse");
+      const dir = join(homedir(), ".hypervoice-code");
       mkdirSync(dir, { recursive: true });
       writeFileSync(
         join(dir, "ratelimits.json"),
@@ -40,7 +49,7 @@ process.stdin.on("end", () => {
 pub const CACHE_SNIPPET: &str = r#"// Add near the top of your statusline script (after parsing stdin JSON as `data`):
 try {
   if (data && data.rate_limits) {
-    const dir = require("path").join(require("os").homedir(), ".synapse");
+    const dir = require("path").join(require("os").homedir(), ".hypervoice-code");
     require("fs").mkdirSync(dir, { recursive: true });
     require("fs").writeFileSync(
       require("path").join(dir, "ratelimits.json"),
@@ -58,8 +67,38 @@ fn home() -> PathBuf {
     PathBuf::from(h)
 }
 
+pub fn app_dir() -> PathBuf {
+    home().join(APP_DIR)
+}
+
 fn hook_path() -> PathBuf {
-    home().join(".synapse").join("statusline-hook.mjs")
+    app_dir().join("statusline-hook.mjs")
+}
+
+/// Where a rate-limit cache may be: the app's folder, then the old one.
+fn cache_files() -> [PathBuf; 2] {
+    [app_dir().join("ratelimits.json"), home().join(LEGACY_DIR).join("ratelimits.json")]
+}
+
+fn age_ms(p: &std::path::Path) -> Option<i64> {
+    let modified = std::fs::metadata(p).ok()?.modified().ok()?;
+    Some(modified.elapsed().ok()?.as_millis() as i64)
+}
+
+/// The freshest rate-limit cache, wherever it was written.
+fn freshest_cache() -> Option<(PathBuf, i64)> {
+    cache_files()
+        .into_iter()
+        .filter_map(|p| age_ms(&p).map(|a| (p, a)))
+        .min_by_key(|(_, a)| *a)
+}
+
+/// Last-known Claude rate-limit windows (5-hour session + weekly).
+pub fn read_rate_limits() -> Value {
+    freshest_cache()
+        .and_then(|(p, _)| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(Value::Null)
 }
 
 fn claude_settings_path() -> PathBuf {
@@ -67,9 +106,7 @@ fn claude_settings_path() -> PathBuf {
 }
 
 fn cache_age_ms() -> Option<i64> {
-    let meta = std::fs::metadata(home().join(".synapse").join("ratelimits.json")).ok()?;
-    let modified = meta.modified().ok()?;
-    Some(modified.elapsed().ok()?.as_millis() as i64)
+    freshest_cache().map(|(_, a)| a)
 }
 
 /// "none" (no statusLine configured), "ours" (our hook), or "other".
@@ -107,6 +144,25 @@ pub fn statusline_status() -> Value {
     })
 }
 
+/// Before the rename the hook lived in `~/.synapse`. If Claude Code's status
+/// line still points at that copy (one we installed, with the user's consent),
+/// move it to the app's folder: write the current script there and repoint
+/// the setting. A status line of the user's own is never touched. Runs once
+/// per start-up; does nothing when there is nothing to move.
+pub fn upgrade_legacy_hook() {
+    let Ok(body) = std::fs::read_to_string(claude_settings_path()) else { return };
+    let Ok(v) = serde_json::from_str::<Value>(&body) else { return };
+    let Some(cmd) = v.get("statusLine").and_then(|s| s.get("command")).and_then(|c| c.as_str()) else { return };
+    let lower = cmd.to_lowercase().replace('/', "\\");
+    if !(lower.contains("statusline-hook.mjs") && lower.contains(&format!("\\{LEGACY_DIR}\\"))) {
+        return;
+    }
+    match write_hook_and_point_at_it() {
+        Ok(()) => info!(target: "synapse2", "usage-limit hook moved from ~/{LEGACY_DIR} to ~/{APP_DIR}"),
+        Err(e) => info!(target: "synapse2", error = %e, "couldn't move the usage-limit hook; the old one keeps working"),
+    }
+}
+
 /// Install the hook: write the script and point `statusLine` at it. Refuses to
 /// clobber an existing custom status line (the UI offers a snippet instead).
 #[tauri::command]
@@ -117,6 +173,14 @@ pub fn install_statusline_hook() -> Result<Value, String> {
             "You already have a status line configured — add the snippet to it instead.".into(),
         );
     }
+    write_hook_and_point_at_it()?;
+    info!(target: "synapse2", hook = %hook_path().display(), "statusline hook installed");
+    Ok(statusline_status())
+}
+
+/// Write the hook script to the app's folder and set Claude Code's
+/// `statusLine` to run it, keeping every other setting.
+fn write_hook_and_point_at_it() -> Result<(), String> {
 
     let hook = hook_path();
     if let Some(dir) = hook.parent() {
@@ -149,7 +213,51 @@ pub fn install_statusline_hook() -> Result<Value, String> {
         serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
+    Ok(())
+}
 
-    info!(target: "synapse2", hook = %hook.display(), "statusline hook installed");
-    Ok(statusline_status())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Our pre-rename hook is moved to ~/.hypervoice-code with the rest of the
+    /// user's Claude settings kept; a status line of the user's own is left
+    /// alone; a cache in the old folder is still read.
+    #[test]
+    fn legacy_hook_moves_and_old_cache_still_reads() {
+        let h = std::env::temp_dir().join(format!("hvc-home-{}", synapse_core::util::new_id()));
+        std::fs::create_dir_all(h.join(".claude")).unwrap();
+        std::fs::create_dir_all(h.join(".synapse")).unwrap();
+        let old_hook = h.join(".synapse").join("statusline-hook.mjs");
+        std::fs::write(&old_hook, "// old").unwrap();
+        let settings = json!({
+            "model": "opus",
+            "statusLine": { "type": "command", "command": format!("node \"{}\"", old_hook.display()) }
+        });
+        std::fs::write(h.join(".claude").join("settings.json"), settings.to_string()).unwrap();
+        std::fs::write(h.join(".synapse").join("ratelimits.json"), r#"{"rateLimits":{"five_hour":{"used_percentage":7}}}"#).unwrap();
+        let saved = std::env::var_os("USERPROFILE");
+        std::env::set_var("USERPROFILE", &h);
+
+        assert_eq!(read_rate_limits()["rateLimits"]["five_hour"]["used_percentage"], 7);
+        upgrade_legacy_hook();
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(h.join(".claude").join("settings.json")).unwrap()).unwrap();
+        let cmd = after["statusLine"]["command"].as_str().unwrap().to_string();
+        assert!(cmd.contains(".hypervoice-code"), "{cmd}");
+        assert_eq!(after["model"], "opus");
+        assert!(h.join(".hypervoice-code").join("statusline-hook.mjs").exists());
+
+        // A user's own status line is never rewritten.
+        let own = json!({ "statusLine": { "type": "command", "command": r"node C:\Users\x\.synapse\mine.mjs" } });
+        std::fs::write(h.join(".claude").join("settings.json"), own.to_string()).unwrap();
+        upgrade_legacy_hook();
+        let still: Value = serde_json::from_str(&std::fs::read_to_string(h.join(".claude").join("settings.json")).unwrap()).unwrap();
+        assert_eq!(still, own);
+
+        match saved {
+            Some(v) => std::env::set_var("USERPROFILE", v),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        let _ = std::fs::remove_dir_all(&h);
+    }
 }

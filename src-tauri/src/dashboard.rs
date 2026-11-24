@@ -76,6 +76,16 @@ pub struct DashStats {
     pub agents: Vec<AgentRun>,
     /// Entry timestamps (ms), newest last, capped — the activity sparkline.
     pub recent_events: Vec<i64>,
+    /// The model's context window when the transcript says (Codex does);
+    /// 0 = unknown, the frontend estimates from the model name.
+    pub context_window: u64,
+    /// Codex only: whether a turn is running (it logs turn start and end).
+    /// None for Claude, whose status is inferred from the transcript.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_open: Option<bool>,
+    /// Codex only: the account's usage-limit windows, as Codex reports them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<Value>,
 }
 
 const RECENT_CAP: usize = 600;
@@ -230,7 +240,10 @@ pub fn update_stats(stats: &mut DashStats, entry: &Value, msgs: &[Message]) {
     }
     if let Some(m) = msgs.last() {
         stats.last_kind = m.kind.as_str().to_string();
-        let head: String = m.text.replace('\n', " ").chars().take(140).collect();
+        // A tool call reads as Claude's own plain-English line when it wrote
+        // one ("Seeing whether …"), not as the raw command.
+        let src = m.desc.as_deref().unwrap_or(&m.text);
+        let head: String = src.replace('\n', " ").chars().take(140).collect();
         stats.last_activity = match m.kind {
             MessageKind::ToolCall | MessageKind::ToolResult | MessageKind::Error => {
                 let tool = m.tool_name.clone().unwrap_or_default();

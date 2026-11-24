@@ -38,7 +38,28 @@ function writeCache(ent) {
   }
 }
 
+// HyperVoice Code is FREE for everyone (2026-11-16 decision): no sign-in wall.
+// The gate below is kept so Pro-only extras can be gated later; while this is
+// true it only starts the updater and renders the app.
+const FREE_FOR_ALL = true;
+
 export default function AuthGate({ children }) {
+  if (FREE_FOR_ALL) return <FreeShell>{children}</FreeShell>;
+  return <SignInGate>{children}</SignInGate>;
+}
+
+function FreeShell({ children }) {
+  const started = useRef(false);
+  useEffect(() => {
+    if (!started.current) {
+      started.current = true;
+      initUpdater();
+    }
+  }, []);
+  return children;
+}
+
+function SignInGate({ children }) {
   const [phase, setPhase] = useState("checking");
   const [ent, setEnt] = useState(null);
   const [offline, setOffline] = useState(false);
@@ -168,7 +189,7 @@ export default function AuthGate({ children }) {
   return (
     <div className="gate">
       <div className="gate-card">
-        <div className="gate-logo"><span className="logo-mark">◆</span> Synapse</div>
+        <div className="gate-logo"><span className="logo-mark">◆</span> HyperVoice Code</div>
         <div className="gate-sub">Claude Code Workspace · HyperVoice Suite</div>
 
         {phase === "checking" && <div className="gate-msg">Checking your account…</div>}
@@ -176,7 +197,7 @@ export default function AuthGate({ children }) {
         {phase === "signin" && (
           <>
             <div className="gate-msg">
-              Synapse is part of the HyperVoice Suite. Sign in with your HyperVoice account to continue.
+              HyperVoice Code is part of the HyperVoice Suite. Sign in with your HyperVoice account to continue.
             </div>
             {offline && (
               <div className="gate-offline-note">
@@ -204,7 +225,7 @@ export default function AuthGate({ children }) {
           <>
             <div className="gate-msg">
               {ent?.email ? <>Signed in as <b>{ent.email}</b>. </> : null}
-              Your plan doesn't include Suite access. Upgrade to HyperVoice Pro or Lifetime to use Synapse.
+              Your plan doesn't include Suite access. Upgrade to HyperVoice Pro or Lifetime to use HyperVoice Code.
             </div>
             <button
               className="gate-btn"

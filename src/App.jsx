@@ -1,4 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { HvPromoRail, HvPromoChip, HvEmptyHint } from "./HvPromo.jsx";
+import { APP_ZOOM, TERM_FONT, READER_ZOOM, stepValue, pct, applyAppZoom } from "./textsize.js";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -9,11 +11,22 @@ import changelogRaw from "../CHANGELOG.md?raw";
 import TerminalPane from "./TerminalPane.jsx";
 import SettingsModal from "./SettingsModal.jsx";
 import SessionBrowser from "./SessionBrowser.jsx";
-import Dashboard, { statusFor, sessionFullAutonomy } from "./Dashboard.jsx";
+import Dashboard, { statusFor, readScreen, sessionFullAutonomy, ctxWindowFor } from "./Dashboard.jsx";
 import { useUpdateStatus, installUpdate, dismissUpdate } from "./updater.js";
 import Background from "./Background.jsx";
-import DiffView from "./DiffView.jsx";
+import Orb from "./visuals/Orb.jsx";
+import StatusGlyph, { glyphKind, tabWord } from "./StatusGlyph.jsx";
 import Markdown from "./Markdown.jsx";
+import { Turn, DetailSwitch, BackgroundStrip, AgentFeed } from "./reader/Reader.jsx";
+import { AgentPanel, Outline } from "./reader/Panels.jsx";
+import { ReaderActions, AgentName } from "./reader/actions.js";
+import { AgentCards, AgentSetup } from "./AgentPicker.jsx";
+import { AGENTS, agentInfo, agentOf, availability, defaultAgent, lastPermMode, useAgentStatus } from "./agents.js";
+import PermModePicker from "./PermModePicker.jsx";
+import { useSortDrag, moveTo } from "./sortable.js";
+import { groupTurns, backgroundTasks } from "./reader/analyze.js";
+import Icon from "./reader/icons.jsx";
+import "./reader/reader.css";
 import {
   TOOL_CATS,
   KIND_COLOR,
@@ -27,10 +40,6 @@ import {
   projectColor,
   tabDisplayName,
   saveTitle,
-  messageDisplay,
-  resolveCategory,
-  displayColor,
-  pillStyle,
 } from "./filters.js";
 
 // Components read the applied theme off the root element; any theme change
@@ -49,9 +58,6 @@ async function toast(title, body) {
   } catch { /* notifications are never load-bearing */ }
 }
 
-const KIND_COLORS = KIND_COLOR;
-const CAT_COLOR = Object.fromEntries(TOOL_CATS.map((c) => [c.key, c.color]));
-const CAT_LABEL = Object.fromEntries(TOOL_CATS.map((c) => [c.key, c.label]));
 
 // Persisted terminal/messages split (percent width of the terminal column).
 const SPLIT_KEY = "synapse2.split.v1";
@@ -62,6 +68,26 @@ function saveSplit(v) { try { localStorage.setItem(SPLIT_KEY, String(Math.round(
 const RAILW_KEY = "synapse2.railw.v1";
 function loadRailW() { const v = parseFloat(localStorage.getItem(RAILW_KEY)); return v >= 150 && v <= 340 ? v : 190; }
 function saveRailW(v) { try { localStorage.setItem(RAILW_KEY, String(Math.round(v))); } catch {} }
+
+// Pinned turns, per session id: { [sessionId]: [turnId, …] }.
+const PINS_KEY = "synapse2.pins.v1";
+function loadPins() { try { return JSON.parse(localStorage.getItem(PINS_KEY) || "{}") || {}; } catch { return {}; } }
+// The sessions that were open, so the next launch can bring them back.
+const OPEN_TABS_KEY = "synapse2.openTabs.v1";
+function loadOpenTabs() {
+  try {
+    const v = JSON.parse(localStorage.getItem(OPEN_TABS_KEY) || "null");
+    const tabs = Array.isArray(v?.tabs) ? v.tabs.filter((t) => t && typeof t.sessionId === "string" && typeof t.cwd === "string").slice(0, 24) : [];
+    return { tabs, active: typeof v?.active === "string" ? v.active : null };
+  } catch { return { tabs: [], active: null }; }
+}
+function saveOpenTabs(v) { try { localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(v)); } catch {} }
+
+// Projects pinned to the top of the left rail (normRoot keys).
+const PINNED_PROJ_KEY = "synapse2.pinnedProjects.v1";
+function loadPinnedProjects() { try { const v = JSON.parse(localStorage.getItem(PINNED_PROJ_KEY) || "[]"); return Array.isArray(v) ? v : []; } catch { return []; } }
+function savePinnedProjects(v) { try { localStorage.setItem(PINNED_PROJ_KEY, JSON.stringify(v)); } catch {} }
+function savePins(p) { try { localStorage.setItem(PINS_KEY, JSON.stringify(p)); } catch {} }
 
 // Render only this many turns by default; older ones sit behind "show earlier".
 const TURN_CAP = 120;
@@ -89,17 +115,17 @@ function fmtReset(epochSec) {
 // One rate-limit window chip: "session 23% · resets in 2h 14m". Color climbs
 // with usage — neutral → gold (50%) → orange (70%) → red (90%) — and a thin
 // progress bar along the bottom shows the exact fill.
-function LimitChip({ icon, label, win }) {
+function LimitChip({ icon, label, win, who = "Claude" }) {
   if (!win || win.used_percentage == null) return null;
   const pct = Math.min(100, Math.round(win.used_percentage));
   const tier = pct >= 90 ? " red" : pct >= 70 ? " orange" : pct >= 50 ? " gold" : "";
   return (
     <div
       className={"usage-chip limit" + tier}
-      title={`${label} window: ${win.used_percentage}% used\nResets ${new Date((win.resets_at || 0) * 1000).toLocaleString()}`}
+      title={`${who} ${label} window: ${win.used_percentage}% used\nResets ${new Date((win.resets_at || 0) * 1000).toLocaleString()}`}
     >
       <span className="limit-fill" style={{ width: pct + "%" }} />
-      {icon} {label} {pct}% · resets in {fmtReset(win.resets_at)}
+      {icon} {label} {pct}%<span className="limit-reset"> · resets in {fmtReset(win.resets_at)}</span>
     </div>
   );
 }
@@ -134,10 +160,10 @@ function UpdateChip() {
         onClick={() => ready && setOpen((v) => !v)}
         title={
           ready
-            ? `Synapse ${st.version} is downloaded and ready — click for what's new`
+            ? `HyperVoice Code ${st.version} is downloaded and ready — click for what's new`
             : st.status === "installing"
-            ? `Installing Synapse ${st.version}…`
-            : `Downloading Synapse ${st.version} in the background — ${st.progress}%`
+            ? `Installing HyperVoice Code ${st.version}…`
+            : `Downloading HyperVoice Code ${st.version} in the background — ${st.progress}%`
         }
       >
         {ready ? "⬆ Update available" : st.status === "installing" ? "Installing…" : `⬆ ${st.progress}%`}
@@ -195,166 +221,64 @@ function UpdateChip() {
   );
 }
 
-const CMD_RE = /^\s*<command-name>([^<]*)<\/command-name>/;
-const LOCAL_RE = /^\s*<local-command-(stdout|caveat)>/;
-// Harness injections Claude Code's own UI hides: <system-reminder> blocks
-// (skill loads, context refreshes) embedded in user text and tool results.
-const stripReminders = (s) =>
-  (s || "").replace(/<system-reminder>[\s\S]*?(<\/system-reminder>|$)/g, "").trim();
-const stripAnsi = (s) => (s || "").replace(/\[[0-9;]*m/g, "");
-
-// Group a flat parsed transcript into turns keyed by the user's prompts.
-// Claude Code's slash-command bookkeeping (<command-name>…, <local-command-stdout>…)
-// is cleaned up: commands become "/name" turns, stdout/caveat blobs fold into
-// the current turn instead of starting noise turns of their own.
-function groupTurns(messages) {
-  const turns = [];
-  let cur = null;
-  for (const m of messages) {
-    if (m.kind === "user") {
-      const text = m.text || "";
-      if (LOCAL_RE.test(text)) {
-        const body = stripAnsi(text.replace(/<\/?local-command-[a-z-]+>/g, "")).trim();
-        if (cur && body) {
-          cur.responses.push({ ...m, kind: "toolresult", text: body });
-        }
-        continue;
-      }
-      const cmd = CMD_RE.exec(text);
-      const isNotif = /^\s*<task-notification>|^\s*\[SYSTEM NOTIFICATION/i.test(text);
-      const cleaned = cmd ? cmd[1].trim() : isNotif ? "" : stripReminders(stripAnsi(text));
-      if (!cmd && !isNotif && !cleaned) continue; // pure injection — not a real turn
-      cur = {
-        id: m.id,
-        prompt: cmd ? cleaned : isNotif ? "background task notification" : cleaned,
-        isCommand: !!cmd || isNotif,
-        isNotif,
-        ts: m.ts,
-        responses: [],
-      };
-      turns.push(cur);
-    } else {
-      if (!cur) { cur = { id: "__start", prompt: "(session start)", responses: [] }; turns.push(cur); }
-      cur.responses.push(m);
-    }
-  }
-  return turns;
+// A project's colour shown as a small folder, not a dot: a coloured dot next
+// to a name reads as a status light (red = something's wrong), and status is
+// the tab icons' job.
+function ProjMark({ color }) {
+  return (
+    <svg className="proj-mark" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M1.5 4.2c0-.8.6-1.4 1.4-1.4h3.3l1.5 1.6h5.4c.8 0 1.4.6 1.4 1.4v6.3c0 .8-.6 1.4-1.4 1.4H2.9c-.8 0-1.4-.6-1.4-1.4z" fill={color} />
+    </svg>
+  );
 }
 
-// ─── agent-style response rendering ─────────────────────────────────────────
-// Claude's prose is the star: it flows unboxed. Tool calls pair with their
-// results into one compact expandable row; thinking collapses to a one-liner.
+// ─── empty reader: the orb ─────────────────────────────────────────────────
 
-// Assistant text / question — plain flowing markdown.
-const Prose = memo(function Prose({ m }) {
+// A new session with nothing to read yet. The orb lights up as you type or
+// dictate into the terminal; once a prompt is sent it sweeps violet until the
+// agent's first words arrive (this whole block is then replaced by the turn).
+// A sent state with no reply for a while falls back to idle: an Enter can
+// also be answering a terminal question, not sending a prompt.
+function ReaderEmpty({ agent }) {
+  const [sent, setSent] = useState(false);
+  // Short windows get a smaller orb so the empty pane never needs a scrollbar.
+  const [short, setShort] = useState(() => window.innerHeight < 700);
+  useEffect(() => {
+    const on = () => setShort(window.innerHeight < 700);
+    window.addEventListener("resize", on);
+    return () => window.removeEventListener("resize", on);
+  }, []);
+  useEffect(() => {
+    let timer = 0;
+    const onInput = (e) => {
+      if (!e.detail?.enter) return;
+      setSent(true);
+      clearTimeout(timer);
+      timer = setTimeout(() => setSent(false), 20000);
+    };
+    window.addEventListener("hvc:input", onInput);
+    return () => { window.removeEventListener("hvc:input", onInput); clearTimeout(timer); };
+  }, []);
   return (
-    <div className="prose md">
-      <Markdown>{m.text}</Markdown>
+    <div className="reader-empty orb-empty">
+      <Orb mode={sent ? "sent" : "idle"} size={short ? 150 : 240} />
+      <div className="orb-words" role="status" aria-live="polite">
+        {sent ? (
+          <>
+            <strong>Over to {agent}</strong>
+            <span>The reply appears here as it comes in, formatted for reading.</span>
+          </>
+        ) : (
+          <>
+            <strong>Nothing to read yet</strong>
+            <span>Type or say a prompt in the terminal. {agent}'s reply appears here, formatted for reading.</span>
+          </>
+        )}
+      </div>
+      <HvEmptyHint />
     </div>
   );
-});
-
-// Plans keep a light frame — they're artifacts worth visually separating.
-const PlanBlock = memo(function PlanBlock({ m }) {
-  const color = displayColor(KIND_COLORS.plan, isLightTheme());
-  return (
-    <div className="plan-block" style={{ borderLeftColor: color }}>
-      <div className="plan-cap" style={{ color }}>⌑ plan</div>
-      <Markdown>{m.text}</Markdown>
-    </div>
-  );
-});
-
-const RESULT_CLAMP_LINES = 12;
-
-// One tool call + its result(s) as a single expandable row:
-//   ▸ Read src/auth.js · 120 lines
-const ToolRow = memo(function ToolRow({ call, results }) {
-  const failed = results.some((r) => r.isError || r.is_error);
-  const [open, setOpen] = useState(failed); // errors start expanded
-  const [showAll, setShowAll] = useState(false);
-  const m = call || results[0];
-  const color = displayColor(
-    failed ? KIND_COLORS.error : (CAT_COLOR[m.toolCategory] || KIND_COLORS.toolcall),
-    isLightTheme()
-  );
-  const resultText = stripReminders(results.map((r) => r.text || "").join("\n")).trimEnd();
-  const lines = resultText ? resultText.split("\n") : [];
-  const summary = failed
-    ? "failed"
-    : call?.editData
-    ? "edit"
-    : lines.length > 1
-    ? `${lines.length} lines`
-    : lines.length === 1 && lines[0].length
-    ? lines[0].slice(0, 60)
-    : "done";
-  const shown = showAll ? lines : lines.slice(0, RESULT_CLAMP_LINES);
-  return (
-    <div className={"trow" + (failed ? " failed" : "")}>
-      <button className="trow-head" onClick={() => setOpen((v) => !v)} title={m.text}>
-        <span className="trow-chev">{open ? "▾" : "▸"}</span>
-        <span className="trow-name" style={{ color }}>{call ? call.toolName || "tool" : "result"}</span>
-        <span className="trow-preview">{call ? call.text : ""}</span>
-        <span className="trow-sum">{summary}</span>
-      </button>
-      {open && (
-        <div className="trow-body">
-          {call?.editData && <DiffView editData={call.editData} toolName={call.toolName} />}
-          {lines.length > 0 && !call?.editData && (
-            <>
-              <pre className="trow-out">{shown.join("\n")}</pre>
-              {lines.length > RESULT_CLAMP_LINES && (
-                <button className="trow-more" onClick={() => setShowAll((v) => !v)}>
-                  {showAll ? "show less" : `show all ${lines.length} lines`}
-                </button>
-              )}
-            </>
-          )}
-          {lines.length === 0 && !call?.editData && <div className="trow-out empty">no output</div>}
-        </div>
-      )}
-    </div>
-  );
-});
-
-// "… thought for a moment" — reasoning on demand, never in the way.
-const ThinkingRow = memo(function ThinkingRow({ m }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="think-row">
-      <button className="think-head" onClick={() => setOpen((v) => !v)}>
-        … thought for a moment {open ? "▾" : "▸"}
-      </button>
-      {open && <pre className="think-body">{m.text}</pre>}
-    </div>
-  );
-});
-
-const ErrorRow = memo(function ErrorRow({ m }) {
-  return <div className="err-row">✗ {m.text}</div>;
-});
-
-// Filtered-out tools collapse into a row (ClaudeConnect style): consecutive
-// same-category tools become ONE marker with a ×N count, packed side-by-side.
-const PillDot = memo(function PillDot({ g }) {
-  const color = displayColor(CAT_COLOR[g.cat] || "#9fb0c9", isLightTheme());
-  return (
-    <span className="pdot" title={`${g.last.toolName || g.cat}${g.count > 1 ? ` ×${g.count}` : ""}`}>
-      <span className="pdot-dot" style={{ background: color }} />
-      {g.count > 1 && <span className="pdot-count">×{g.count}</span>}
-    </span>
-  );
-});
-const PillFull = memo(function PillFull({ g }) {
-  const style = pillStyle(CAT_COLOR[g.cat] || "#9fb0c9", isLightTheme());
-  const label = CAT_LABEL[g.cat] || g.last.toolName || g.cat;
-  return (
-    <span className="pfull" style={style} title={g.last.toolName || label}>
-      ▸ {label}{g.count > 1 ? ` ×${g.count}` : ""}
-    </span>
-  );
-});
+}
 
 // ─── what's-new (post-update) + first-run welcome ───────────────────────────
 
@@ -398,17 +322,22 @@ const TOUR = [
   {
     icon: "▶",
     title: "Sessions live in tabs",
-    body: "Start a session in any folder, or press ⧉ to resume any Claude Code session on this machine — full history included. Drag tabs to reorder, double-click to rename.",
+    body: "Start a session in any folder, or press ⧉ to resume any Claude Code or Codex session on this machine — full history included. Drag tabs to reorder, double-click to rename.",
   },
   {
     icon: "❯",
     title: "Terminal + conversation, side by side",
-    body: "The left pane is the real claude CLI — type there as normal. The right pane lays the conversation out as collapsible turns: search it, expand tool calls and diffs, export it.",
+    body: "The left pane is the real claude or codex CLI — type there as normal. The right pane lays the conversation out as collapsible turns: search it, expand tool calls and diffs, export it.",
   },
   {
     icon: "⌨",
     title: "Your left hand drives",
     body: "Ctrl+Shift+T new session · Ctrl+Shift+R resume · Ctrl+Shift+F search · Ctrl+Tab switch tabs. Press Ctrl+Shift+D anytime for the full list.",
+  },
+  {
+    icon: "🎙",
+    title: "Talk instead of typing",
+    body: "Pair it with HyperVoice, our dictation app: press a hotkey, say your prompt, and it's typed into the terminal. Free to start at hypervoice.app.",
   },
 ];
 
@@ -447,6 +376,7 @@ const HOTKEYS = [
   ["Ctrl+Shift+E", "Export conversation (Markdown)"],
   ["Ctrl+Shift+G", "Jump to latest turn"],
   ["Ctrl+Shift+B", "Mission Control (dashboard)"],
+  ["Ctrl+Shift+A", "Next session that needs you"],
   ["Ctrl+Shift+S", "Settings"],
   ["Ctrl+Shift+D", "This cheat-sheet"],
   ["Esc", "Close any overlay"],
@@ -480,138 +410,50 @@ function HotkeySheet({ onClose }) {
   );
 }
 
-// One turn in the unified feed: your prompt is the card header, Claude's
-// responses nest underneath when expanded. Collapsed turns cost nothing —
-// their items aren't even built. `live` is only ever true for the latest
-// turn, so busy-flag flips don't re-render the whole feed.
-const TurnCard = memo(function TurnCard({ t, expanded, live, matchCount = 0, filters, catById, onToggle }) {
-  const items = useMemo(
-    () => (expanded ? buildItems(t.responses, filters, catById) : []),
-    [expanded, t.responses.length, filters, catById]
-  );
-  return (
-    <div className={"tcard" + (expanded ? " open" : "")}>
-      <button className="tcard-head" onClick={() => onToggle(t.id)} title={t.prompt}>
-        <span className="tcard-chev">{expanded ? "▾" : "▸"}</span>
-        <span className={"tcard-prompt" + (expanded ? "" : " one-line") + (t.isCommand ? " cmd" : "")}>
-          {t.isCommand ? "⌘ " : "› "}{(t.prompt || "(session start)").slice(0, 400)}
-        </span>
-        {live && <span className="turn-live">live</span>}
-        {matchCount > 0 && <span className="tcard-match">{matchCount} match{matchCount > 1 ? "es" : ""}</span>}
-        {!expanded && <span className="tcard-count">{t.responses.length}</span>}
-      </button>
-      {expanded && (
-        <div className="tcard-body">
-          {items.length === 0 && <div className="empty">{live ? "● working…" : "No responses."}</div>}
-          {items.map((it, i) => {
-            switch (it.type) {
-              case "prose": return <Prose key={it.m.id} m={it.m} />;
-              case "plan": return <PlanBlock key={it.m.id} m={it.m} />;
-              case "tool": return <ToolRow key={(it.call || it.results[0]).id} call={it.call} results={it.results} />;
-              case "thinking": return <ThinkingRow key={it.m.id} m={it.m} />;
-              case "error": return <ErrorRow key={it.m.id} m={it.m} />;
-              default: return (
-                <div key={"row" + i} className="pill-row">
-                  {it.groups.map((g, j) =>
-                    g.variant === "pill" ? <PillFull key={j} g={g} /> : <PillDot key={j} g={g} />
-                  )}
-                </div>
-              );
-            }
-          })}
-        </div>
-      )}
-    </div>
-  );
-});
-
-// Collapse a turn's responses into render items: flowing prose, paired
-// tool rows (call + its results matched via toolUseId), thinking expanders,
-// and 'pillrow' runs of consecutive filtered-out tools.
-function buildItems(responses, filters, catById) {
-  // Pair every tool result with its originating call up front.
-  const resultsByUse = {};
-  for (const m of responses) {
-    // Include errored results (kind === "error") so a failed tool call's output
-    // attaches to its call row (which has dedicated failed-state UI) instead of
-    // rendering as a detached error bubble with the call left looking output-less.
-    if ((m.kind === "toolresult" || m.kind === "error") && m.toolUseId) {
-      (resultsByUse[m.toolUseId] = resultsByUse[m.toolUseId] || []).push(m);
-    }
-  }
-  const paired = new Set();
-
-  const items = [];
-  let run = [];
-  const flush = () => {
-    if (!run.length) return;
-    const groups = [];
-    for (const it of run) {
-      const lg = groups[groups.length - 1];
-      if (lg && lg.cat === it.cat && lg.variant === it.disp) { lg.count += 1; lg.last = it.m; }
-      else groups.push({ cat: it.cat, variant: it.disp, count: 1, last: it.m });
-    }
-    items.push({ type: "pillrow", groups });
-    run = [];
-  };
-
-  for (const m of responses) {
-    if (m.kind === "toolcall") {
-      const results = (m.toolUseId && resultsByUse[m.toolUseId]) || [];
-      const disp = messageDisplay(m, filters, catById);
-      if (disp === "full") {
-        results.forEach((r) => paired.add(r.id));
-        flush();
-        items.push({ type: "tool", call: m, results });
-      } else if (disp === "hidden") {
-        results.forEach((r) => paired.add(r.id));
-      } else {
-        results.forEach((r) => paired.add(r.id));
-        run.push({ m, disp, cat: resolveCategory(m, catById) });
-      }
-    } else if (m.kind === "toolresult") {
-      if (paired.has(m.id)) continue; // shown inside its tool row
-      const disp = messageDisplay(m, filters, catById);
-      if (disp === "full") { flush(); items.push({ type: "tool", call: null, results: [m] }); }
-      else if (disp !== "hidden") run.push({ m, disp, cat: resolveCategory(m, catById) });
-    } else if (m.kind === "thinking") {
-      if (messageDisplay(m, filters, catById) === "full") { flush(); items.push({ type: "thinking", m }); }
-    } else if (m.kind === "error") {
-      if (paired.has(m.id)) continue; // already shown inside its tool row
-      if (messageDisplay(m, filters, catById) === "full") { flush(); items.push({ type: "error", m }); }
-    } else if (m.kind === "plan") {
-      if (messageDisplay(m, filters, catById) === "full") { flush(); items.push({ type: "plan", m }); }
-    } else {
-      // message / question / anything textual → flowing prose
-      if (messageDisplay(m, filters, catById) === "full") { flush(); items.push({ type: "prose", m }); }
-    }
-  }
-  flush();
-  return items;
-}
-
-function Launch({ onStart, recent = [], onOpenSettings, onOpenBrowser, onCancel }) {
+function Launch({ onStart, recent = [], onOpenSettings, onOpenBrowser, onCancel, filters }) {
   const [folder, setFolder] = useState("");
-  // Default OFF: --dangerously-skip-permissions lets Claude run shell/edits/deletes
-  // with no prompts, so it must be a deliberate opt-in, not the default.
-  const [fullAutonomy, setFullAutonomy] = useState(false);
+  // Claude Code or Codex: starts on the Settings default (or the installed
+  // one), re-checked every time this screen opens.
+  const status = useAgentStatus();
+  const [agentPick, setAgentPick] = useState(null);
+  const agent = agentPick || defaultAgent(filters, status);
+  const agentMissing = availability(status, agent) === "missing";
+  const noneInstalled = !!status && ["claude", "codex"].every((k) => availability(status, k) === "missing");
+  // Permission mode, per agent: starts on whichever was used last (else the
+  // agent's own "ask" default). Skipping permissions is never the first-run default.
+  const [modePick, setModePick] = useState({});
+  const permMode = modePick[agent] || lastPermMode(filters, agent);
   const [worktrees, setWorktrees] = useState(false);
   const [error, setError] = useState("");
-  const [orphans, setOrphans] = useState(0);
+  const [orphans, setOrphans] = useState([]);   // leftover worktrees, each with what it still holds
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [picked, setPicked] = useState({});     // name -> bool
+  const reviewLinkRef = useRef(null);
+  const closeReview = () => { setReviewOpen(false); setTimeout(() => reviewLinkRef.current?.focus(), 0); };
+  useEffect(() => {
+    if (!reviewOpen) return;
+    const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); closeReview(); } };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [reviewOpen]);
   useEffect(() => {
     if (!onCancel) return;
-    const onKey = (e) => { if (e.key === "Escape") onCancel(); };
+    const onKey = (e) => { if (e.key === "Escape" && !reviewOpen) onCancel(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
-  // Old session worktrees left behind in the chosen folder → offer cleanup.
-  useEffect(() => {
-    setOrphans(0);
+  }, [onCancel, reviewOpen]);
+  // Old session worktrees left behind in the chosen folder → offer a review.
+  function loadOrphans() {
     const f = folder.trim();
-    if (!f) return;
-    invoke("list_orphan_worktrees", { folder: f })
-      .then((l) => setOrphans((l || []).length))
-      .catch(() => {});
+    if (!f) { setOrphans([]); return Promise.resolve([]); }
+    return invoke("list_orphan_worktrees", { folder: f })
+      .then((l) => { const list = Array.isArray(l) ? l : []; setOrphans(list); return list; })
+      .catch(() => { setOrphans([]); return []; });
+  }
+  useEffect(() => {
+    setOrphans([]);
+    const id = setTimeout(loadOrphans, 350); // not on every keystroke
+    return () => clearTimeout(id);
   }, [folder]);
   async function pick() {
     try {
@@ -622,27 +464,62 @@ function Launch({ onStart, recent = [], onOpenSettings, onOpenBrowser, onCancel 
   async function go() {
     setError("");
     if (!folder.trim()) { setError("Choose a folder first."); return; }
-    try { await onStart({ folder, fullAutonomy, worktrees }); } catch (e) { setError(String(e)); }
+    if (noneInstalled) { setError("Neither Claude Code nor Codex is installed on this PC. Install one with its Get it ↗ link; this screen checks again each time it opens."); return; }
+    if (agentMissing) { setError(`${AGENTS[agent].name} isn't installed on this PC. Install it (Get it ↗), or pick the other agent.`); return; }
+    try { await onStart({ folder, permMode, worktrees, agent }); } catch (e) { setError(String(e)); }
   }
+  // Open the review with only the provably-empty worktrees ticked. One that
+  // still holds work has to be ticked by hand, with what it holds in view.
+  async function openReview() {
+    const list = await loadOrphans();
+    setPicked(Object.fromEntries(list.map((w) => [w.name, !!w.safe])));
+    setReviewOpen(true);
+  }
+  const pickedList = orphans.filter((w) => picked[w.name]);
+  const pickedUnsafe = pickedList.filter((w) => !w.safe);
   async function cleanup() {
     try {
-      const n = await invoke("cleanup_orphan_worktrees", { folder: folder.trim() });
-      setOrphans(0);
-      setError("");
-      if (n > 0) setError(`Cleaned up ${n} old worktree(s).`);
+      const r = await invoke("cleanup_orphan_worktrees", {
+        folder: folder.trim(),
+        names: pickedList.map((w) => w.name),
+        discardWork: pickedUnsafe.map((w) => w.name),
+      });
+      setReviewOpen(false);
+      await loadOrphans();
+      const removed = (r?.removed || []).length;
+      const skipped = r?.skipped || [];
+      setError(
+        `Removed ${removed} old worktree${removed === 1 ? "" : "s"}.` +
+          (skipped.length ? ` Left ${skipped.length} alone: ${skipped.map((x) => `${x.name} (${x.reason})`).join(", ")}.` : "")
+      );
     } catch (e) { setError(String(e)); }
   }
+  const holds = (w) => {
+    if (w.safe) return "Empty — nothing to lose";
+    const parts = [];
+    if (w.changedFiles == null) parts.push("can't be read as a worktree");
+    else if (w.changedFiles > 0) parts.push(`${w.changedFiles} unsaved file${w.changedFiles === 1 ? "" : "s"}`);
+    if (w.unmergedCommits == null) parts.push("its branch can't be checked");
+    else if (w.unmergedCommits > 0) parts.push(`${w.unmergedCommits} commit${w.unmergedCommits === 1 ? "" : "s"} not merged`);
+    if (w.ignoredFiles > 0) parts.push(`${w.ignoredFiles} untracked-by-git item${w.ignoredFiles === 1 ? "" : "s"}${w.ignoredExample ? ` (e.g. ${w.ignoredExample})` : ""}`);
+    return parts.join(" · ");
+  };
   return (
     <div className="launch">
       <div className="launch-card">
         <div className="launch-head">
-          <div className="logo"><span className="logo-mark">◆</span> {onCancel ? "New session" : "Synapse 2"}</div>
+          <div className="logo"><span className="logo-mark">◆</span> {onCancel ? "New session" : "HyperVoice Code"}</div>
           <div className="launch-head-btns">
             {onOpenSettings && <button className="launch-gear" onClick={onOpenSettings} title="Settings">⚙</button>}
             {onCancel && <button className="launch-gear" onClick={onCancel} title="Cancel">✕</button>}
           </div>
         </div>
-        <div className="tagline">A terminal-driven Claude Code, with your conversation laid out beside it.</div>
+        <div className="tagline">Claude Code or Codex in a terminal, with the conversation laid out beside it.</div>
+        <label id="launch-agent-label">Agent</label>
+        <AgentCards value={agent} onChange={setAgentPick} status={status} labelledBy="launch-agent-label" />
+        {noneInstalled && (
+          <p className="launch-note">Neither is installed on this PC yet. Install one with its “Get it” link; this screen checks again each time it opens.</p>
+        )}
         <label>Folder</label>
         <div className="row">
           <input className="folder-input" type="text" value={folder} placeholder="Choose a folder…" onChange={(e) => setFolder(e.target.value)} />
@@ -667,20 +544,55 @@ function Launch({ onStart, recent = [], onOpenSettings, onOpenBrowser, onCancel 
             </div>
           </div>
         )}
+        <label id="launch-perm-label">Permissions</label>
+        <PermModePicker agent={agent} value={permMode} onChange={(k) => setModePick((m) => ({ ...m, [agent]: k }))} />
         <div className="toggles">
-          <label><input type="checkbox" checked={fullAutonomy} onChange={(e) => setFullAutonomy(e.target.checked)} /> Full autonomy (--dangerously-skip-permissions)</label>
           <label><input type="checkbox" checked={worktrees} onChange={(e) => setWorktrees(e.target.checked)} /> Git worktree isolation (if the folder is a repo)</label>
         </div>
-        {orphans > 0 && (
+        {orphans.length > 0 && (
           <div className="orphan-row">
-            {orphans} old session worktree(s) in this folder —{" "}
-            <button className="link-like" onClick={cleanup}>clean them up</button>
+            {orphans.length} old session worktree{orphans.length === 1 ? "" : "s"} in this folder
+            {orphans.some((w) => !w.safe) ? ` (${orphans.filter((w) => !w.safe).length} still holding work)` : ""} —{" "}
+            <button ref={reviewLinkRef} className="link-like" onClick={openReview}>review</button>
           </div>
         )}
         <button className="start" onClick={go}>▶ Start session</button>
         <button className="resume-link" onClick={onOpenBrowser}>⧉ …or resume a previous session</button>
-        {error && <div className="error" role="button" title="Dismiss" onClick={() => setError("")}>{error} <span className="error-x">✕</span></div>}
+        {error && <div className="error" role="alert" title="Click to dismiss" onClick={() => setError("")}>{error} <span className="error-x" aria-hidden="true">✕</span></div>}
       </div>
+      {reviewOpen && (
+        <div className="modal-backdrop" onClick={closeReview}>
+          <div className="confirm wt-review" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Old session worktrees">
+            <div className="confirm-title">Old session worktrees</div>
+            <div className="confirm-body">
+              Each is a separate copy of this folder that a past session worked in. Removing one deletes that copy and its branch.
+              Sessions open right now are not listed.
+            </div>
+            <div className="wt-list">
+              {orphans.map((w) => (
+                <label key={w.name} className={"wt-row" + (w.safe ? "" : " risky")}>
+                  <input type="checkbox" checked={!!picked[w.name]} onChange={(e) => setPicked((p) => ({ ...p, [w.name]: e.target.checked }))} />
+                  <span className="wt-name"><code>{w.branch}</code></span>
+                  <span className="wt-holds">{holds(w)}</span>
+                </label>
+              ))}
+              {orphans.length === 0 && <div className="wt-none">Nothing left to clean up.</div>}
+            </div>
+            {pickedUnsafe.length > 0 && (
+              <div className="wt-warn">
+                {pickedUnsafe.length === 1 ? "1 ticked worktree still holds work" : `${pickedUnsafe.length} ticked worktrees still hold work`} that
+                exists nowhere else. Removing {pickedUnsafe.length === 1 ? "it" : "them"} deletes that work for good.
+              </div>
+            )}
+            <div className="confirm-btns">
+              <button className="btn-ghost" autoFocus onClick={closeReview}>Cancel</button>
+              <button className={pickedUnsafe.length ? "confirm-danger" : "sm-btn"} disabled={pickedList.length === 0} onClick={cleanup}>
+                {pickedUnsafe.length ? `Remove ${pickedList.length} and delete the work in ${pickedUnsafe.length}` : `Remove ${pickedList.length}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -716,7 +628,14 @@ export default function App() {
   const [whatsNew, setWhatsNew] = useState(null); // version string when shown
   const [appVersion, setAppVersion] = useState("");
   const [welcomeOpen, setWelcomeOpen] = useState(false);
-  const dragTab = useRef(null);
+  // "Which coding agent do you use?" — once, for new and existing users alike.
+  const [agentSetupOpen, setAgentSetupOpen] = useState(() => !loadFilters().defaultAgent);
+  const [agentOpen, setAgentOpen] = useState(null);   // {id, label} — subagent feed over the reader
+  const [outlineOpen, setOutlineOpen] = useState(false);
+  const [pins, setPins] = useState(loadPins);         // sessionId -> [turnId]
+  const termApi = useRef({});                         // tabId -> {send, focus} of its terminal
+  const outlineBtnRef = useRef(null);
+  const [pinnedProj, setPinnedProj] = useState(loadPinnedProjects);
   const feedSearchRef = useRef(null);
 
   // Post-update "what's new" (once per version) + first-run welcome tour.
@@ -732,6 +651,10 @@ export default function App() {
       localStorage.setItem(SEEN_VERSION_KEY, v);
     }).catch(() => {});
   }, []);
+  function finishAgentSetup(v) {
+    setFlag("defaultAgent", v === "codex" ? "codex" : "claude");
+    setAgentSetupOpen(false);
+  }
   function finishWelcome() {
     try { localStorage.setItem(TOURED_KEY, "1"); } catch {}
     setWelcomeOpen(false);
@@ -768,6 +691,7 @@ export default function App() {
     settings: () => openSettings("appearance"),
     cheatsheet: () => setHotkeysOpen((v) => !v),
     dashboard: () => setDashOpen((v) => !v),
+    needsYou: () => jumpNeedsYou(),
   };
   useEffect(() => {
     // Primary bindings live in the LEFT-hand zone (QWERT/ASDFG + 1-5 + Tab)
@@ -792,6 +716,7 @@ export default function App() {
       if (k === "s") return go(h.settings);
       if (k === "d") return go(h.cheatsheet);
       if (k === "b") return go(h.dashboard);
+      if (k === "a") return go(h.needsYou);
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
@@ -803,6 +728,82 @@ export default function App() {
   const tabsRef = useRef(tabs);
   const fetchingRef = useRef({});
   tabsRef.current = tabs;
+
+  // Reopen last time's sessions on launch (Settings → Start-up). Each one is
+  // resumed like a manual Resume (full history), in the permission mode it was
+  // open in last time (sessions saved before modes existed reopen in "ask").
+  const [restoreDone, setRestoreDone] = useState(false);
+  const restoreStarted = useRef(false);
+  const parkedTabs = useRef([]); // saved tabs whose agent isn't installed (kept for next launch)
+  const hadMessages = useRef(new Set(loadOpenTabs().tabs.map((t) => t.sessionId)));
+  useEffect(() => {
+    if (restoreStarted.current) return;
+    restoreStarted.current = true;
+    (async () => {
+      const saved = loadOpenTabs();
+      if (filters.restoreTabs !== false) {
+        const skipped = [];
+        for (const t of saved.tabs) {
+          const r = await resume({ sessionId: t.sessionId, cwd: t.cwd, agent: t.agent }, t.title || null, { quiet: true, permMode: t.permMode || "default" });
+          if (r === "missing") skipped.push(t);
+        }
+        // Not reopened because their agent isn't installed: say so, and keep
+        // them on the list so they come back once it is.
+        parkedTabs.current = skipped;
+        if (skipped.length) {
+          const names = [...new Set(skipped.map((t) => AGENTS[t.agent === "codex" ? "codex" : "claude"].name))];
+          const n = skipped.length;
+          setError(`${n} session${n === 1 ? "" : "s"} from last time ${n === 1 ? "wasn't" : "weren't"} reopened because ${names.join(" and ")} ${names.length === 1 ? "isn't" : "aren't"} installed on this PC. ${n === 1 ? "It comes" : "They come"} back once ${names.length === 1 ? "it's" : "they're"} installed.`);
+        }
+        setTimeout(() => {
+          const a = tabsRef.current.find((x) => x.sessionId === saved.active);
+          if (a) setActiveId(a.id);
+        }, 0);
+      }
+      setRestoreDone(true);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Remember what is open. A session with nothing said in it yet has no
+  // conversation to come back to, so it is not remembered.
+  useEffect(() => {
+    if (!restoreDone) return;
+    for (const t of tabs) if ((convos[t.id]?.messages?.length || 0) > 0) hadMessages.current.add(t.sessionId);
+    saveOpenTabs({
+      tabs: [
+        ...tabs.filter((t) => t.sessionId && hadMessages.current.has(t.sessionId)).map((t) => ({ sessionId: t.sessionId, cwd: t.cwd, title: t.title || null, agent: agentOf(t), permMode: t.permMode || "default" })),
+        ...parkedTabs.current.filter((p) => !tabs.some((t) => t.sessionId === p.sessionId)),
+      ],
+      active: tabs.find((t) => t.id === activeId)?.sessionId || null,
+    });
+  }, [tabs, activeId, convos, restoreDone]);
+
+  // A new Codex tab starts under an id the app made up; when Codex creates the
+  // session (on the first prompt) the backend switches to Codex's own id.
+  // Follow it, so resume, restore, titles and pins use the id Codex knows.
+  useEffect(() => {
+    let un = null;
+    let alive = true;
+    listen("syn2:rekey", (e) => {
+      const { from, to } = e.payload || {};
+      // `to` goes into a command line on terminal restart: plain ids only.
+      if (!from || !to || !/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(to)) return;
+      const tab = tabsRef.current.find((t) => t.sessionId === from);
+      if (tab?.title) saveTitle(to, tab.title);
+      setTabs((ts) => ts.map((t) => {
+        if (t.sessionId !== from) return t;
+        return { ...t, sessionId: to, resumeCommand: `codex resume ${to}${t.permFlags || ""}` };
+      }));
+      setPins((p) => {
+        if (!p[from]) return p;
+        const n = { ...p, [to]: p[from] };
+        delete n[from];
+        savePins(n);
+        return n;
+      });
+    }).then((u) => { if (alive) un = u; else u(); });
+    return () => { alive = false; if (un) un(); };
+  }, []);
 
   // Delta-fetch one tab's new messages (the backend tails the transcript and
   // caches parsed messages — this never re-reads or re-parses the file).
@@ -833,10 +834,12 @@ export default function App() {
           if (steps > 0 && stillAway && filtersRef.current.notifyOnFinish) {
             const tab = tabsRef.current.find((x) => x.id === t.id);
             const name = tab ? tabDisplayName(tab) : "Session";
-            toast(`◆ ${name}`, `Claude finished — ${steps} new step${steps > 1 ? "s" : ""}.`);
+            toast(`◆ ${name}`, `${agentInfo(tab).short} finished — ${steps} new step${steps > 1 ? "s" : ""}.`);
           }
         }, 2500);
-        if (t.id !== activeIdRef.current) setNewById((n) => ({ ...n, [t.id]: true }));
+        // The first fetch is the session's history loading (app start, resume),
+        // not something new: only later activity marks the tab as unseen.
+        if (since > 0 && t.id !== activeIdRef.current) setNewById((n) => ({ ...n, [t.id]: true }));
       }
       setConvos((c) => {
         const prev = c[t.id] || { messages: [], ready: false, usage: null };
@@ -883,6 +886,8 @@ export default function App() {
   // Track the active tab + clear its unseen-activity marker when you switch to it.
   useEffect(() => {
     activeIdRef.current = activeId;
+    setAgentOpen(null);
+    setOutlineOpen(false);
     if (activeId) setNewById((n) => (n[activeId] ? { ...n, [activeId]: false } : n));
   }, [activeId]);
 
@@ -1007,6 +1012,12 @@ export default function App() {
         root: s.root,
         cwd: s.cwd,
         command: s.command,
+        agent: s.agent === "codex" ? "codex" : "claude",
+        // Set once a new Codex session's id is known: what to run if the
+        // terminal is restarted (Claude's is derived from `command`).
+        resumeCommand: null,
+        permMode: s.permMode || "default",
+        permFlags: s.permFlags || "",
         branch: s.branch,
         title: title || null,
         dupSeq,
@@ -1016,9 +1027,13 @@ export default function App() {
     setActiveId(id);
     setNewOpen(false);
     setBrowserOpen(false);
+    return id;
   }
 
   // Start a session → add a tab (never closes existing ones).
+  // Heads-ups about one session (e.g. "another session is in this folder"),
+  // keyed by tab id; shown as a dismissible card in that tab's conversation.
+  const [notices, setNotices] = useState({});
   async function start(opts) {
     // A second non-worktree session in an already-occupied folder can stomp the
     // first one's edits — nudge toward isolation (after starting; not a block).
@@ -1027,32 +1042,65 @@ export default function App() {
       tabsRef.current.some((t) => normRoot(t.root || t.cwd) === normRoot(opts.folder));
     const s = await invoke("start_session", { opts });
     setRecent(addRecentFolder(opts.folder));
-    addTab(s, null);
+    if (opts.agent) setFlag("lastAgent", opts.agent);
+    rememberPermMode(s.agent, s.permMode);
+    const tabId = addTab(s, null);
     // Isolation was requested but silently fell back to the real folder — warn.
-    setError(
-      s.worktreeError
-        ? `Worktree isolation couldn't be created (${s.worktreeError}); this session runs directly in the folder — edits are NOT sandboxed.`
-        : clash
-        ? "Heads up: another session is already running in this folder — parallel sessions can overwrite each other's edits. The worktree option isolates each session."
-        : ""
-    );
+    const note = s.worktreeError
+      ? { kind: "error", title: "Not isolated", text: `The worktree couldn't be created (${s.worktreeError}), so this session works directly in the folder. Its edits are not sandboxed.` }
+      : clash
+      ? { kind: "warn", title: "Another session is in this folder", text: "Sessions working in the same folder can overwrite each other's edits. Choose the worktree option when you start a session to keep each one separate." }
+      : null;
+    setNotices((n) => {
+      const next = { ...n };
+      if (note) next[tabId] = note; else delete next[tabId];
+      return next;
+    });
   }
 
   // Resume an existing Claude Code session from the browser. Autonomy is OFF by
   // default — resuming to view/continue a session must not silently grant
   // --dangerously-skip-permissions.
-  async function resume(sessionMeta, title) {
+  function rememberPermMode(agent, mode) {
+    if (!mode) return;
+    const a = agent === "codex" ? "codex" : "claude";
+    setFilters((f) => {
+      if (f.lastPermMode?.[a] === mode) return f;
+      const n = { ...f, lastPermMode: { ...(f.lastPermMode || {}), [a]: mode } };
+      saveFilters(n);
+      return n;
+    });
+  }
+  // `permMode`: what the user picked; null = this agent's last-used mode.
+  // A restored tab passes the mode it was open in.
+  async function resume(sessionMeta, title, { quiet = false, permMode = null } = {}) {
+    // Already open? Go to that tab: two terminals on one session would fight
+    // over the same transcript (and the same worktree).
+    const open = tabsRef.current.find((t) => t.sessionId === sessionMeta.sessionId);
+    if (open) { setActiveId(open.id); setBrowserOpen(false); setNewOpen(false); return "open"; }
+    // The session's own tool must be on this PC, or the terminal would only
+    // say "command not found". Checked fresh each time (a few file checks).
+    const ag = sessionMeta.agent === "codex" ? "codex" : "claude";
+    const st = await invoke("agent_status").catch(() => null);
+    if (availability(st, ag) === "missing") {
+      if (!quiet) setError(`${AGENTS[ag].name} isn't installed on this PC, so this ${AGENTS[ag].name} session can't be reopened. Install it (Settings → Workspace → Coding agent has the link), then resume it again.`);
+      return "missing";
+    }
     try {
       setError("");
       const s = await invoke("resume_session", {
         sessionId: sessionMeta.sessionId,
         cwd: sessionMeta.cwd || "",
-        fullAutonomy: false,
+        permMode: permMode || lastPermMode(filtersRef.current, ag),
+        agent: ag,
       });
+      if (!quiet) rememberPermMode(ag, s.permMode);
       if (sessionMeta.cwd) setRecent(addRecentFolder(sessionMeta.cwd));
       addTab(s, title || sessionMeta.title || null);
+      return "ok";
     } catch (e) {
       setError(String(e));
+      return "error";
     }
   }
 
@@ -1064,6 +1112,7 @@ export default function App() {
     delete busyTimers.current[id];
     delete bgWorkRef.current[id];
     delete fetchingRef.current[id];
+    delete termApi.current[id];
     const prune = (setter) =>
       setter((s) => { if (!(id in s)) return s; const n = { ...s }; delete n[id]; return n; });
     setConvos((c) => { const n = { ...c }; delete n[id]; return n; });
@@ -1125,20 +1174,40 @@ export default function App() {
     }));
   }
 
-  // Drag-reorder tabs.
-  function dropTab(targetId) {
-    const src = dragTab.current;
-    dragTab.current = null;
-    if (!src || src === targetId) return;
-    setTabs((ts) => {
-      const a = [...ts];
-      const i = a.findIndex((x) => x.id === src);
-      const j = a.findIndex((x) => x.id === targetId);
-      if (i < 0 || j < 0) return ts;
-      const [m] = a.splice(i, 1);
-      a.splice(j, 0, m);
-      return a;
-    });
+  // Left-rail layout: one group per project folder, pinned projects first,
+  // each section and each group in the order of the tabs. While something is
+  // being dragged, `drag` shows the order it would have if dropped now.
+  function railLayout(ts, pinned, drag) {
+    const by = new Map();
+    for (const t of ts) {
+      const key = normRoot(t.root || t.cwd);
+      if (!by.has(key)) by.set(key, { key, root: t.root || t.cwd, pinned: pinned.includes(key), tabs: [] });
+      by.get(key).tabs.push(t);
+    }
+    let pin = [...by.values()].filter((g) => g.pinned);
+    let rest = [...by.values()].filter((g) => !g.pinned);
+    if (drag?.kind === "group") {
+      if (drag.scope === "groups:pinned") pin = moveTo(pin, drag.id, drag.index, (g) => g.key);
+      else rest = moveTo(rest, drag.id, drag.index, (g) => g.key);
+    }
+    if (drag?.kind === "tab" && drag.scope !== "tabs:*") {
+      const g = by.get(drag.scope.slice(5));
+      if (g) g.tabs = moveTo(g.tabs, drag.id, drag.index, (t) => t.id);
+    }
+    return { pin, rest };
+  }
+  const flatOf = ({ pin, rest }) => [...pin, ...rest].flatMap((g) => g.tabs);
+  // Dropped: make the tab order match what was shown.
+  const sorter = useSortDrag((d) => {
+    setTabs((ts) => (d.scope === "tabs:*" ? moveTo(ts, d.id, d.index, (t) => t.id) : flatOf(railLayout(ts, pinnedRef.current, d))));
+  });
+  const pinnedRef = useRef(pinnedProj);
+  pinnedRef.current = pinnedProj;
+  function togglePinProject(key) {
+    const next = pinnedProj.includes(key) ? pinnedProj.filter((k) => k !== key) : [...pinnedProj, key];
+    setPinnedProj(next);
+    savePinnedProjects(next);
+    setTabs((ts) => flatOf(railLayout(ts, next, null)));
   }
 
   // Inline tab rename (double-click) — also names the session in the browser.
@@ -1152,7 +1221,7 @@ export default function App() {
   const recentList = recent.slice(0, filters.recentFoldersLimit ?? 5);
   const bgMode = filters.backgroundMode || "none";
   const bgColor = filters.backgroundColor;
-  const tabPos = filters.tabPosition || "top";
+  const tabPos = filters.tabPosition || "left";
   const rootClass = "root" + (bgMode !== "none" ? " bg-active" : "");
   const settingsModal = (
     <SettingsModal
@@ -1171,7 +1240,7 @@ export default function App() {
     />
   );
   const browserModal = browserOpen && (
-    <SessionBrowser onResume={resume} onClose={() => setBrowserOpen(false)} />
+    <SessionBrowser onResume={(s, title, permMode) => resume(s, title, { permMode })} filters={filters} onClose={() => setBrowserOpen(false)} />
   );
 
   // NOTE: every hook below must run on EVERY render — including the no-tabs
@@ -1179,17 +1248,189 @@ export default function App() {
   // conditional return crash React with "rendered more hooks than before"
   // the moment the first tab appears).
   const activeTab = tabs.find((t) => t.id === activeId) || tabs[tabs.length - 1] || null;
+
+  // A paste (Ctrl+V, or dictation from HyperVoice, which pastes into whatever
+  // window is in front) that lands while no text field has the cursor would
+  // otherwise vanish. Send it to the active session instead: into the prompt
+  // composer when it's on, else into the terminal's input. Never presses Enter.
+  // Pastes into a real field (terminal, composer, search, reply box) and
+  // pastes while a dialog is open are left alone.
+  const composerOn = !!filters.showComposer;
+  const activeTabId = activeTab?.id;
+  useEffect(() => {
+    const isField = (el) =>
+      !!el && (el.isContentEditable || el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT");
+    const onPaste = (e) => {
+      const el = document.activeElement;
+      if (isField(el) || isField(e.target)) return;
+      if (el?.closest?.('[role="dialog"], .modal-backdrop, .launch-overlay')) return;
+      if (document.querySelector('.modal-backdrop, .launch-overlay')) return;
+      const text = e.clipboardData?.getData("text/plain");
+      const api = termApi.current[activeTabId];
+      if (!text || !api || !api.alive()) return;
+      e.preventDefault();
+      if (composerOn && api.compose && api.compose(text)) return;
+      api.paste(text);
+      api.focus();
+    };
+    document.addEventListener("paste", onPaste);
+    return () => document.removeEventListener("paste", onPaste);
+  }, [activeTabId, composerOn]);
+
+  // Zoom and text size, VS Code style (see textsize.js).
+  const [zoomNote, setZoomNote] = useState(null);
+  const zoomNoteTimer = useRef(0);
+  const appZoom = filters.appZoom || 1;
+  useEffect(() => { applyAppZoom(appZoom); }, [appZoom]);
+  useEffect(() => {
+    const show = (text) => {
+      setZoomNote(text);
+      clearTimeout(zoomNoteTimer.current);
+      zoomNoteTimer.current = setTimeout(() => setZoomNote(null), 1200);
+    };
+    const bump = (spec, dir, label, fmt) => {
+      setFilters((f) => {
+        const v = dir === 0 ? spec.def : stepValue(spec, f[spec.key], dir);
+        show(`${label} ${fmt(v)}`);
+        if (v === f[spec.key]) return f;
+        const n = { ...f, [spec.key]: v };
+        saveFilters(n);
+        return n;
+      });
+    };
+    const app = (dir) => bump(APP_ZOOM, dir, "Zoom", pct);
+    // A mouse notch is ~100; trackpads send many small deltas. One step per notch.
+    let acc = 0;
+    const onWheel = (e) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      if (document.querySelector(".modal-backdrop, .launch-overlay")) return;
+      acc += e.deltaY;
+      if (Math.abs(acc) < 50) return;
+      const dir = acc < 0 ? 1 : -1;
+      acc = 0;
+      // Ctrl+scroll zooms the whole window wherever the pointer is (Chris,
+      // 2026-11-16). Per-pane sizes are set in Settings → Appearance.
+      app(dir);
+    };
+    const onKey = (e) => {
+      if (!e.ctrlKey || e.altKey || e.metaKey) return;
+      const k = e.key;
+      let dir = null;
+      if (k === "=" || k === "+") dir = 1;
+      else if (k === "-" || k === "_") dir = -1;
+      else if (k === "0" && !e.shiftKey) dir = 0;
+      if (dir === null) return;
+      e.preventDefault();
+      e.stopPropagation();
+      app(dir);
+    };
+    window.addEventListener("wheel", onWheel, { passive: false, capture: true });
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("wheel", onWheel, { capture: true });
+      window.removeEventListener("keydown", onKey, true);
+      clearTimeout(zoomNoteTimer.current);
+    };
+  }, []);
   const confirmTab = tabs.find((t) => t.id === confirmCloseId) || null;
   const convo = (activeTab && convos[activeTab.id]) || {};
   const messages = convo.messages || [];
   const ready = convo.ready || false;
   const usage = convo.usage || null;
   const busy = !!(activeTab && busyById[activeTab.id]);
-  const startupStuck = !!activeTab && !ready && Date.now() - (activeTab.createdAt || 0) > 12000;
+  const activeAgent = agentInfo(activeTab);
+  const codexAwaitingFirst = agentOf(activeTab) === "codex" && !/^codex resume /.test(activeTab?.command || "");
+  const startupStuck = !!activeTab && !ready && !codexAwaitingFirst && Date.now() - (activeTab.createdAt || 0) > 12000;
 
   const turns = useMemo(() => groupTurns(messages), [messages]);
+  const detail = filters.detail || "answer";
+  const [readerMenu, setReaderMenu] = useState(false);
+  const activeSess = activeTab ? dash?.sessions?.[activeTab.sessionId] : null;
+  // What each session's terminal is showing (a permission prompt, a running
+  // step, or nothing we recognise). Read at most twice a second per tab.
+  const screenCache = useRef({});
+  const screenFor = (tabId) => {
+    const hit = screenCache.current[tabId];
+    const now = Date.now();
+    if (hit && now - hit.t < 500) return hit.v;
+    let v = null;
+    try {
+      const api = termApi.current[tabId];
+      if (api && api.alive() && api.bottom) v = readScreen(api.bottom());
+    } catch { v = null; }
+    screenCache.current[tabId] = { t: now, v };
+    return v;
+  };
+  const activeStatus = activeTab ? statusFor(activeSess?.stats, busy, ready, { fullAutonomy: sessionFullAutonomy(activeTab), screen: screenFor(activeTab.id), agent: agentOf(activeTab) }) : null;
+  // Agents / background commands Claude launched that haven't reported back.
+  const bgAll = useMemo(() => backgroundTasks(messages), [messages]);
+  const bgRunning = useMemo(() => bgAll.filter((t) => !t.done), [bgAll]);
+  const bgMap = useMemo(() => Object.fromEntries(bgAll.map((t) => [t.toolUseId, t])), [bgAll]);
+  // What the reader may do in the active session. The object is stable (the
+  // memoised turns never re-render for it); the live closures are swapped in
+  // on every render through the ref.
+  const actImpl = useRef({});
+  const readerActions = useMemo(() => ({
+    answer: (ask, i) => !!actImpl.current.answer?.(ask, i),
+    type: (text) => !!actImpl.current.type?.(text),
+    focusTerminal: () => actImpl.current.focusTerminal?.(),
+    openAgent: (id, label) => actImpl.current.openAgent?.(id, label),
+    togglePin: (t) => actImpl.current.togglePin?.(t),
+  }), []);
+  const pinList = (activeTab && pins[activeTab.sessionId]) || [];
+  actImpl.current = {
+    // Answer a single-choice question by pressing its number in the terminal.
+    // A keypress goes to whatever is on screen, so first make sure that is
+    // this question: it was asked after this terminal opened (not a leftover
+    // from a resumed session), and the option, numbered as we expect, is on
+    // the terminal's screen. Otherwise send nothing.
+    answer: (ask, index) => {
+      const api = termApi.current[activeTab?.id];
+      const opt = ask?.questions?.[0]?.options?.[index];
+      if (!api || !opt || !api.alive() || !(ask.at > api.openedAt)) return false;
+      const squash = (s) => String(s).replace(/\s+/g, " ").trim();
+      if (!squash(api.screen()).includes(`${index + 1}. ${squash(opt.label).slice(0, 24)}`)) return false;
+      api.send(String(index + 1));
+      return true;
+    },
+    // Put a reply in the terminal's input; you press Enter there to send it.
+    type: (text) => {
+      const api = termApi.current[activeTab?.id];
+      if (!api || !api.alive()) return false;
+      api.paste(text);
+      return true;
+    },
+    focusTerminal: () => termApi.current[activeTab?.id]?.focus(),
+    openAgent: (id, label) => setAgentOpen({ id, label: label || "" }),
+    togglePin: (t) => {
+      if (!activeTab) return;
+      setPins((p) => {
+        const cur = p[activeTab.sessionId] || [];
+        const next = cur.includes(t.id) ? cur.filter((x) => x !== t.id) : [...cur, t.id];
+        const all = { ...p, [activeTab.sessionId]: next };
+        if (!next.length) delete all[activeTab.sessionId];
+        savePins(all);
+        return all;
+      });
+    },
+  };
+  const liveNow = busy || activeStatus?.key === "working";
+  // Only a tool step names an activity ("Bash"); a prompt or reply's text is
+  // not one (it showed your own prompt as "Working · <your prompt>").
+  const liveActivity = ["toolcall", "toolresult", "error"].includes(activeSess?.stats?.lastKind)
+    ? (activeSess?.stats?.lastActivity || "").split(" · ")[0].replace(/^⑂ /, "").slice(0, 60) || null
+    : null;
   const latestId = turns.length ? turns[turns.length - 1].id : null;
   const latestTurn = turns.length ? turns[turns.length - 1] : null;
+  // The answer to the last thing you asked stays open even when background-task
+  // turns arrive after it; otherwise a finished background job folds away the
+  // reply you were waiting for.
+  const askedId = useMemo(() => {
+    for (let i = turns.length - 1; i >= 0; i--) if (!turns[i].isNotif) return turns[i].id;
+    return null;
+  }, [turns]);
+  const openByDefault = (id) => id === latestId || id === askedId;
   const overrides = (activeTab && expandById[activeTab.id]) || {};
 
   // Auto-collapse-on-send: when a brand-new turn appears in the tab you're
@@ -1250,7 +1491,9 @@ export default function App() {
     CSS.highlights.delete("syn-search");
     if (!searching || !feedRef.current) return;
     const ranges = [];
-    const walker = document.createTreeWalker(feedRef.current, NodeFilter.SHOW_TEXT);
+    const walker = document.createTreeWalker(feedRef.current, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (n.parentElement?.closest(".reader-empty") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+    });
     let node;
     while ((node = walker.nextNode()) && ranges.length < 2000) {
       const text = node.nodeValue || "";
@@ -1294,6 +1537,30 @@ export default function App() {
     stickRef.current = atBottom;
     setUnstuck(!atBottom);
   }
+  // Open the turn that launched a background task and scroll to it.
+  function jumpToStep(toolUseId) {
+    const t = turns.find((x) => x.responses.some((m) => m.toolUseId === toolUseId));
+    if (!t || !activeTab) return;
+    setExpandById((s) => ({ ...s, [activeTab.id]: { ...(s[activeTab.id] || {}), [t.id]: true } }));
+    setTimeout(() => {
+      const el = feedRef.current?.querySelector(`[data-turn="${CSS.escape(t.id)}"]`);
+      if (el && feedRef.current) feedRef.current.scrollTop = el.offsetTop - feedRef.current.offsetTop - 8;
+    }, 50);
+  }
+  // Open any turn and bring it to the top of the reader (outline, pins).
+  function jumpToTurn(turnId) {
+    if (!activeTab) return;
+    const idx = turns.findIndex((x) => x.id === turnId);
+    if (idx < 0) return;
+    if (searchQ) setSearchQ("");
+    if (turns.length - idx > TURN_CAP) setShowAllTurns((s) => ({ ...s, [activeTab.id]: true }));
+    setExpandById((s) => ({ ...s, [activeTab.id]: { ...(s[activeTab.id] || {}), [turnId]: true } }));
+    stickRef.current = false;
+    setTimeout(() => {
+      const el = feedRef.current?.querySelector(`[data-turn="${CSS.escape(turnId)}"]`);
+      if (el && feedRef.current) { feedRef.current.scrollTop = el.offsetTop - feedRef.current.offsetTop - 8; setUnstuck(true); }
+    }, 60);
+  }
   function jumpToLatest() {
     stickRef.current = true;
     setUnstuck(false);
@@ -1307,7 +1574,7 @@ export default function App() {
   function onFeedKey(e) {
     if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      const heads = Array.from(feedRef.current?.querySelectorAll(".tcard-head") || []);
+      const heads = Array.from(feedRef.current?.querySelectorAll(".turn-toggle") || []);
       if (!heads.length) return;
       const i = heads.indexOf(document.activeElement);
       const next = heads[Math.max(0, Math.min(heads.length - 1, (i < 0 ? 0 : i + (e.key === "ArrowDown" ? 1 : -1))))];
@@ -1317,12 +1584,13 @@ export default function App() {
         next.scrollIntoView({ block: "nearest" });
       }
     } else if (e.key === "Escape") {
-      const openCard = document.activeElement?.closest?.(".tcard.open");
-      const head = openCard?.querySelector(".tcard-head");
+      const openCard = document.activeElement?.closest?.(".turn.open");
+      const head = openCard?.querySelector(".turn-toggle");
       if (head) {
         e.preventDefault();
-        head.click(); // collapse, keep focus on the card
-        head.focus();
+        const id = openCard.dataset.turn;
+        head.click(); // collapse, then keep focus on the (re-rendered) row
+        setTimeout(() => feedRef.current?.querySelector(`[data-turn="${CSS.escape(id)}"] .turn-toggle`)?.focus(), 30);
       }
     }
   }
@@ -1333,12 +1601,12 @@ export default function App() {
       <div className={rootClass}>
         <Background mode={bgMode} color={bgColor} speed={filters.warpSpeed} light={effTheme === "light"} />
         <div className="update-float"><UpdateChip /></div>
-        <Launch onStart={start} recent={recentList} onOpenSettings={() => openSettings("appearance")} onOpenBrowser={() => setBrowserOpen(true)} />
+        <Launch onStart={start} recent={recentList} filters={filters} onOpenSettings={() => openSettings("appearance")} onOpenBrowser={() => setBrowserOpen(true)} />
         {browserModal}
         {settingsModal}
         {hotkeysOpen && <HotkeySheet onClose={() => setHotkeysOpen(false)} />}
-        {welcomeOpen && <Welcome onDone={finishWelcome} />}
-        {!welcomeOpen && whatsNew && <WhatsNew version={whatsNew} onClose={() => setWhatsNew(null)} />}
+        {agentSetupOpen ? <AgentSetup filters={filters} onDone={finishAgentSetup} /> : welcomeOpen && <Welcome onDone={finishWelcome} />}
+        {!welcomeOpen && !agentSetupOpen && whatsNew && <WhatsNew version={whatsNew} onClose={() => setWhatsNew(null)} />}
       </div>
     );
   }
@@ -1358,7 +1626,7 @@ export default function App() {
       if (format === "json") {
         content = JSON.stringify({ sessionId: activeTab.sessionId, cwd: activeTab.cwd, usage, messages }, null, 2);
       } else {
-        const lines = [`# Claude Code session — ${activeTab.cwd}`, ""];
+        const lines = [`# ${activeAgent.name} session — ${activeTab.cwd}`, ""];
         for (const t of turns) {
           lines.push(`## › ${t.prompt || "(session start)"}`, "");
           for (const m of t.responses) {
@@ -1375,11 +1643,41 @@ export default function App() {
     }
   }
 
+  // Is the agent launched by this tool call still going? Background agents end
+  // with a notification; ordinary ones end when their tool call gets a result.
+  function agentRunning(toolUseId) {
+    const bg = bgMap[toolUseId];
+    if (bg) return !bg.done;
+    return !messages.some((m) => m.toolUseId === toolUseId && (m.kind === "toolresult" || m.kind === "error"));
+  }
+  const ctxTokens = activeSess?.stats?.contextTokens || 0;
+  const ctxWin = ctxWindowFor(activeSess?.stats?.lastModel, ctxTokens, activeSess?.stats?.contextWindow);
+  // Usage-limit chips follow the active tab's agent: Claude's come from its
+  // status-line hook, Codex's from its own session file.
+  const onCodex = agentOf(activeTab) === "codex";
+  const codexWin = (w) => (w && w.used_percent != null ? { used_percentage: w.used_percent, resets_at: w.resets_at } : null);
+  const limitFive = onCodex ? codexWin(activeSess?.stats?.rateLimits?.primary) : rateLimits?.rateLimits?.five_hour;
+  const limitWeek = onCodex ? codexWin(activeSess?.stats?.rateLimits?.secondary) : rateLimits?.rateLimits?.seven_day;
+  // Mark tabs whose agent isn't the usual one (or every tab, when the
+  // default is "last used" and both kinds are open).
+  const basePref = filters.defaultAgent === "codex" ? "codex" : filters.defaultAgent === "last" ? null : "claude";
+  const mixedAgents = new Set(tabs.map(agentOf)).size > 1;
+  const showAgentPill = (t) => (basePref ? agentOf(t) !== basePref : mixedAgents);
+  const ctxPct = ctxTokens ? Math.min(100, Math.round((ctxTokens / ctxWin) * 100)) : 0;
+
   // One status per tab, from the same statusFor that drives Mission Control —
   // so the tab dots, the fleet chip and the dashboard can never disagree.
   function tabStatus(t) {
     const sess = dash?.sessions?.[t.sessionId];
-    return statusFor(sess?.stats, !!busyById[t.id], sess?.ready, { fullAutonomy: sessionFullAutonomy(t) });
+    const bgCount = backgroundTasks(convos[t.id]?.messages || []).filter((x) => !x.done).length;
+    return statusFor(sess?.stats, !!busyById[t.id], sess?.ready, { fullAutonomy: sessionFullAutonomy(t), background: bgCount, screen: screenFor(t.id), agent: agentOf(t) });
+  }
+  // Go to the next session that is waiting on you (wraps around).
+  function jumpNeedsYou() {
+    const need = tabs.filter((t) => tabStatus(t).key === "attention");
+    if (!need.length) return;
+    const i = need.findIndex((t) => t.id === activeTab?.id);
+    setActiveId(need[(i + 1) % need.length].id);
   }
   function tabAttention(id) {
     const t = tabs.find((x) => x.id === id);
@@ -1399,38 +1697,40 @@ export default function App() {
   // header, so the tab itself shows only its distinguishing bit.
   const renderTab = (t, grouped) => {
     const name = grouped ? t.title || `session ${t.dupSeq || 1}` : tabDisplayName(t);
+    const scope = grouped ? "tabs:" + normRoot(t.root || t.cwd) : "tabs:*";
     // Always-on status indicator (same derivation as Mission Control).
     const sess = dash?.sessions?.[t.sessionId];
     const st = tabStatus(t);
+    const isNew = st.key === "idle" && t.id !== activeTab.id && !!newById[t.id];
+    const word = tabWord(st, {
+      lastKind: sess?.stats?.lastKind,
+      lastActivity: sess?.stats?.lastActivity,
+      agentsRunning: (sess?.stats?.agents || []).filter((a) => !a.done).length,
+    });
     return (
           <div
             key={t.id}
-            className={"tab" + (t.id === activeTab.id ? " active" : "")}
+            className={"tab" + (t.id === activeTab.id ? " active" : "") + (st.key === "attention" ? " needs" : "") + (isNew ? " fresh" : "") + (sorter.drag?.kind === "tab" && sorter.drag.id === t.id ? " sort-dragging" : "")}
             onClick={() => setActiveId(t.id)}
-            title={t.cwd + " · double-click to rename, drag to reorder"}
-            draggable={renamingTab !== t.id}
-            onDragStart={() => (dragTab.current = t.id)}
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={() => dropTab(t.id)}
+            title={t.cwd + " · " + agentInfo(t).name + " · double-click to rename, drag to reorder"}
+            data-sort-scope={scope}
+            data-sort-id={t.id}
+            onPointerDown={(e) => renamingTab !== t.id && sorter.begin(e, { kind: "tab", scope, id: t.id, axis: grouped ? "y" : "x" })}
             onDoubleClick={() => { setRenamingTab(t.id); setRenameVal(t.title || name); }}
             onContextMenu={(e) => { e.preventDefault(); setCtxMenu({ id: t.id, x: e.clientX, y: e.clientY }); }}
           >
             <span className="tab-proj" style={{ background: projectColor(t.root || t.cwd) }} title={t.root || t.cwd} />
-            {st.key === "attention" ? (
-              <span className="tab-sig" title={st.hint}>
-                {{ toolcall: "⚠", question: "?", plan: "▤" }[sess?.stats?.lastKind] || "⚠"}
-              </span>
-            ) : st.key === "working" ? (
-              <span className="tab-spin" title={st.hint} />
-            ) : t.id !== activeTab.id && newById[t.id] ? (
-              <span className="tab-dot" title="New activity" />
-            ) : (
-              <span className="tab-dot idle" title={st.hint} />
-            )}
+            <StatusGlyph
+              kind={glyphKind(st, { lastKind: sess?.stats?.lastKind, isNew })}
+              size={14}
+              className="tab-glyph"
+              title={isNew ? "Finished while you were on another tab" : `${st.label.charAt(0).toUpperCase() + st.label.slice(1)}: ${st.hint}`}
+            />
             {renamingTab === t.id ? (
               <form className="tab-rename" onSubmit={(e) => { e.preventDefault(); commitTabRename(t); }}>
                 <input
                   autoFocus
+                  onFocus={(e) => e.target.select()}
                   value={renameVal}
                   onChange={(e) => setRenameVal(e.target.value)}
                   onBlur={() => commitTabRename(t)}
@@ -1441,101 +1741,114 @@ export default function App() {
             ) : (
               <span className="tab-name">{name}</span>
             )}
-            {st.key === "working" && sess?.stats?.lastKind === "toolcall" && sess.stats.lastActivity && renamingTab !== t.id && (
-              <span className="tab-tool" title={sess.stats.lastActivity}>
-                {sess.stats.lastActivity.split(" · ")[0].replace(/^⑂ /, "")}
-              </span>
+            {showAgentPill(t) && renamingTab !== t.id && (
+              <span className="tab-agent" title={`${agentInfo(t).name} session`}>{agentInfo(t).short}</span>
+            )}
+            {word && renamingTab !== t.id && (
+              <span className={"tab-word" + (st.key === "attention" ? " needs" : "")} title={st.hint}>{word}</span>
             )}
             <button className="tab-x" onClick={(e) => { e.stopPropagation(); setCloseAction("keep"); setConfirmCloseId(t.id); }} title="Close session">✕</button>
           </div>
         );
   };
 
-  // Left rail groups tabs under one header per project folder; the top bar
-  // stays flat (horizontal space is too tight for headers).
-  const tabGroups = (() => {
-    const by = new Map();
-    for (const t of tabs) {
-      const key = normRoot(t.root || t.cwd);
-      if (!by.has(key)) by.set(key, { key, root: t.root || t.cwd, tabs: [] });
-      by.get(key).tabs.push(t);
-    }
-    return [...by.values()];
-  })();
+  // Left rail groups tabs under one header per project folder (pinned ones
+  // first); the top bar stays flat (horizontal space is too tight for headers).
+  const rail = railLayout(tabs, pinnedProj, sorter.drag);
+  const topTabs = sorter.drag?.scope === "tabs:*" ? moveTo(tabs, sorter.drag.id, sorter.drag.index, (t) => t.id) : tabs;
+  const renderGroup = (g) => (
+    <div
+      key={g.key}
+      className={"tabgroup" + (g.pinned ? " pinned" : "") + (sorter.drag?.kind === "group" && sorter.drag.id === g.key ? " sort-dragging" : "")}
+      data-sort-scope={g.pinned ? "groups:pinned" : "groups:rest"}
+      data-sort-id={g.key}
+    >
+      <div
+        className="tabgroup-head"
+        title={g.root + " · drag to reorder projects"}
+        onPointerDown={(e) => sorter.begin(e, { kind: "group", scope: g.pinned ? "groups:pinned" : "groups:rest", id: g.key, axis: "y" })}
+        onContextMenu={(e) => { e.preventDefault(); setCtxMenu({ group: g.key, x: e.clientX, y: e.clientY }); }}
+      >
+        <ProjMark color={projectColor(g.root)} />
+        <span className="tabgroup-name">{baseNameOf(g.root)}</span>
+        {g.tabs.length > 1 && <span className="tabgroup-count">{g.tabs.length}</span>}
+        <button
+          className={"tabgroup-pin" + (g.pinned ? " on" : "")}
+          onClick={() => togglePinProject(g.key)}
+          title={g.pinned ? "Unpin this project" : "Pin this project to the top"}
+          aria-label={g.pinned ? `Unpin ${baseNameOf(g.root)}` : `Pin ${baseNameOf(g.root)} to the top`}
+          aria-pressed={g.pinned}
+        >📌</button>
+      </div>
+      {g.tabs.map((t) => renderTab(t, true))}
+    </div>
+  );
 
   const tabBar = (
     <div className={"tabbar " + tabPos} style={tabPos === "left" ? { width: railW } : undefined}>
-      {tabPos === "left"
-        ? tabGroups.map((g) => (
-            <div key={g.key} className="tabgroup">
-              <div className="tabgroup-head" title={g.root}>
-                <span className="proj-dot" style={{ background: projectColor(g.root) }} />
-                <span className="tabgroup-name">{baseNameOf(g.root)}</span>
-                {g.tabs.length > 1 && <span className="tabgroup-count">{g.tabs.length}</span>}
-              </div>
-              {g.tabs.map((t) => renderTab(t, true))}
-            </div>
-          ))
-        : tabs.map((t) => renderTab(t, false))}
-      {tabPos === "left" ? (
-        // The rail has room for labels — two proper buttons side by side.
+      {/* Left rail: New / Resume stay pinned on top, only the tabs scroll, and
+          the HyperVoice card stays pinned below. */}
+      {tabPos === "left" && (
         <div className="rail-actions">
           <button className="rail-btn" onClick={() => setNewOpen(true)} title="Start a new session (Ctrl+Shift+T)">＋ New</button>
           <button className="rail-btn" onClick={() => setBrowserOpen(true)} title="Resume a previous session (Ctrl+Shift+R)">⧉ Resume</button>
         </div>
+      )}
+      <div className={tabPos === "left" ? "tabbar-scroll" : "tabbar-flow"}>
+      {tabPos === "left" ? (
+        <>
+          {rail.pin.length > 0 && <div className="rail-section">Pinned</div>}
+          {rail.pin.map(renderGroup)}
+          {rail.pin.length > 0 && rail.rest.length > 0 && <div className="rail-section">Projects</div>}
+          {rail.rest.map(renderGroup)}
+        </>
       ) : (
         <>
+          {topTabs.map((t) => renderTab(t, false))}
           <button className="tab-new" onClick={() => setNewOpen(true)} title="New session">＋</button>
           <button className="tab-new" onClick={() => setBrowserOpen(true)} title="Resume a previous session">⧉</button>
         </>
       )}
+      </div>
+      {tabPos === "left" && <HvPromoRail />}
     </div>
   );
 
   return (
+    <AgentName.Provider value={activeAgent.short}>
     <div className={rootClass}>
+      <div className="zoom-note" role="status" aria-live="polite">{zoomNote || ""}</div>
       <Background mode={bgMode} color={bgColor} speed={filters.warpSpeed} light={effTheme === "light"} />
       <div className="app">
         <header className="topbar">
           <div className="logo">
-            <span className="logo-mark">◆</span> Synapse 2
+            <span className="logo-mark">◆</span> HyperVoice Code
             {appVersion && (
               <button className="logo-ver" onClick={() => setWhatsNew(appVersion)} title="What's new in this version">
                 v{appVersion}
               </button>
             )}
           </div>
-          <div className="session-info" title={activeTab.cwd}>
-            <span className="proj-dot" style={{ background: projectColor(activeTab.root || activeTab.cwd) }} />
-            {activeTab.cwd}{activeTab.branch ? ` · ⌥ ${activeTab.branch}` : ""}
-          </div>
-          {usage && (usage.input > 0 || usage.output > 0) && (
-            <div
-              className="usage-chip"
-              title={`Input ${usage.input.toLocaleString()} · Output ${usage.output.toLocaleString()}\nCache read ${usage.cacheRead.toLocaleString()} · Cache write ${usage.cacheCreation.toLocaleString()}`}
-            >
-              ⛁ {fmtTokens(usage.input + usage.cacheCreation)} in · {fmtTokens(usage.output)} out
-            </div>
-          )}
-          <LimitChip icon="⏱" label="session" win={rateLimits?.rateLimits?.five_hour} />
-          <LimitChip icon="📅" label="week" win={rateLimits?.rateLimits?.seven_day} />
+          <LimitChip icon="⏱" label="session" win={limitFive} who={activeAgent.short} />
+          <LimitChip icon="📅" label="week" win={limitWeek} who={activeAgent.short} />
           <button
             className="usage-chip fleet-chip"
             onClick={() => setDashOpen(true)}
             title={`Fleet: ${tabs.length} session(s) · ${fleetWorking} working · ${fleetNeeds} needing you · ${fleetAgents} subagent(s) live\nClick for Mission Control (Ctrl+Shift+B)`}
           >
             <span className="fleet-seg">▦ {tabs.length}</span>
-            <span className={"fleet-seg" + (fleetWorking ? " ok" : " dim")}>● {fleetWorking} working</span>
-            <span className={"fleet-seg" + (fleetNeeds ? " warn" : " dim")}>⚠ {fleetNeeds} need you</span>
-            <span className={"fleet-seg" + (fleetAgents ? " ok" : " dim")}>⑂ {fleetAgents} agents</span>
+            <span className={"fleet-seg" + (fleetWorking ? " ok" : " dim")}><StatusGlyph kind={fleetWorking ? "working" : "idle"} size={11} />{fleetWorking} working</span>
+            <span className={"fleet-seg" + (fleetNeeds ? " warn" : " dim")}><StatusGlyph kind={fleetNeeds ? "approve" : "idle"} size={11} />{fleetNeeds} need you</span>
+            <span className={"fleet-seg" + (fleetAgents ? " ok" : " dim")}>⑂ {fleetAgents} {fleetAgents === 1 ? "subagent" : "subagents"}</span>
           </button>
-          <div className="run-state">
-            {tabAttention(activeTab.id) && !busy && (
-              <span className="attn-hint" title="The last activity was a tool call with no result yet — Claude may be waiting for you in the terminal">⚠ waiting?</span>
-            )}
-            {busy ? <span className="pulse">● working…</span> : ready ? `${turns.length} turn(s)` : ""}
-          </div>
+          {tabs.some((t) => t.id !== activeTab.id && tabStatus(t).key === "attention") && (
+            <button className="usage-chip needs-btn" onClick={jumpNeedsYou} title="Go to the next session that needs you (Ctrl+Shift+A)">
+              Next waiting →
+            </button>
+          )}
+          <span className="topbar-spacer" />
           <UpdateChip />
+          {tabPos === "top" && <HvPromoChip />}
           <button className="filters-btn hk-btn" onClick={() => setHotkeysOpen(true)} title="Keyboard shortcuts (Ctrl+Shift+D)">⌨</button>
           <button className="filters-btn" onClick={() => openSettings("appearance")} title="Settings">⚙ Settings</button>
         </header>
@@ -1551,78 +1864,247 @@ export default function App() {
             <section className="term-col">
               {tabs.map((t) => (
                 <div key={t.id} className="term-host" style={{ display: t.id === activeTab.id ? "block" : "none" }}>
-                  <TerminalPane cwd={t.cwd} command={t.command} composer={!!filters.showComposer} />
+                  <TerminalPane cwd={t.cwd} command={t.command} resumeCommand={t.resumeCommand} composer={!!filters.showComposer} fontSize={filters.termFontSize || TERM_FONT.def} onApi={(api) => { if (api) termApi.current[t.id] = api; else delete termApi.current[t.id]; }} />
                 </div>
               ))}
             </section>
             <div className="divider" onMouseDown={startDrag} title="Drag to resize" />
-            <section className="convo-col">
-              <div className="rsp-head-row">
-                <h3 style={{ margin: 0 }}>Conversation</h3>
-                <div className="feed-search">
+            <section className="convo-col" style={{ "--reader-scale": filters.readerZoom || 1 }} data-accents={filters.readingAccents === false ? "off" : "on"}>
+              <div className="reader-head" inert={agentOpen ? "" : undefined}>
+                <span className="reader-title">
+                  Conversation
+                  {turns.length > 0 && <span className="reader-count">{turns.length}</span>}
+                </span>
+                <div className="reader-search">
+                  <Icon name="search" size={13} />
                   <input
                     ref={feedSearchRef}
                     type="text"
                     value={searchQ}
                     onChange={(e) => setSearchQ(e.target.value)}
-                    placeholder="Search this session…   (Ctrl+Shift+F)"
+                    placeholder="Search"
+                    aria-label="Search conversation"
+                    title="Search this session (Ctrl+Shift+F)"
                   />
-                  {searching && (
-                    <span className="feed-search-meta">
-                      {visibleTurns.length} turn(s)
-                      <button onClick={() => setSearchQ("")} title="Clear search">✕</button>
-                    </span>
+                  {searchQ && <button className="clear" onClick={() => setSearchQ("")} title="Clear search" aria-label="Clear search">✕</button>}
+                </div>
+                {searching && <span className="search-meta">{visibleTurns.length} of {turns.length}</span>}
+                <span className="spacer" />
+                <div className="reader-menu outline-anchor">
+                  <button
+                    ref={outlineBtnRef}
+                    className={"icon-btn" + (pinList.length ? " has-pins" : "")}
+                    onClick={() => setOutlineOpen((v) => !v)}
+                    title="Jump to a prompt, or to a pinned turn"
+                    aria-label="Outline of prompts"
+                    aria-haspopup="menu"
+                    aria-expanded={outlineOpen}
+                  ><Icon name="list" size={14} /></button>
+                  {outlineOpen && <Outline turns={turns} pins={pinList} onJump={jumpToTurn} onClose={() => { setOutlineOpen(false); outlineBtnRef.current?.focus(); }} />}
+                </div>
+                <DetailSwitch value={detail} onChange={(v) => setFlag("detail", v)} />
+                <div className="reader-menu">
+                  <button
+                    className="icon-btn"
+                    onClick={() => setReaderMenu((v) => !v)}
+                    title="More"
+                    aria-label="More"
+                    aria-haspopup="menu"
+                    aria-expanded={readerMenu}
+                  >⋯</button>
+                  {readerMenu && (
+                    <>
+                      <div className="ctx-overlay" onClick={() => setReaderMenu(false)} />
+                      <div
+                        className="menu-pop"
+                        role="menu"
+                        onClick={() => setReaderMenu(false)}
+                        onKeyDown={(e) => {
+                          const items = [...e.currentTarget.querySelectorAll("button")];
+                          const i = items.indexOf(document.activeElement);
+                          if (e.key === "Escape") { e.preventDefault(); setReaderMenu(false); e.currentTarget.parentElement.querySelector(".icon-btn")?.focus(); }
+                          else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                            e.preventDefault();
+                            items[(i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length]?.focus();
+                          }
+                        }}
+                        ref={(el) => el && !el.contains(document.activeElement) && el.querySelector("button")?.focus()}
+                      >
+                        <button role="menuitem" onClick={() => setExpandById((s) => ({ ...s, [activeTab.id]: Object.fromEntries(visibleTurns.map((t) => [t.id, true])) }))}>Expand all turns</button>
+                        <button role="menuitem" onClick={() => setExpandById((s) => ({ ...s, [activeTab.id]: Object.fromEntries(visibleTurns.map((t) => [t.id, false])) }))}>Collapse all turns</button>
+                        <button role="menuitem" onClick={() => exportConversation("md")}>Export as Markdown <span className="hint">Ctrl+Shift+E</span></button>
+                        <button role="menuitem" onClick={() => exportConversation("json")}>Export as JSON</button>
+                      </div>
+                    </>
                   )}
                 </div>
-                <span className="head-actions">
-                  <button className="head-btn" onClick={() => exportConversation("md")} title="Export this conversation as Markdown">⤓ md</button>
-                  <button className="head-btn" onClick={() => exportConversation("json")} title="Export this conversation as JSON">⤓ json</button>
-                </span>
               </div>
               {startupStuck && (
                 <div className="warn-banner">
-                  No transcript yet — Claude may not have started in the terminal. Check it for errors (or just press Enter there).
+                  No transcript yet — {activeAgent.short} may not have started in the terminal. Check it for errors (or just press Enter there).
                 </div>
               )}
-              <div className="feed-uni" ref={feedRef} onScroll={onFeedScroll} onKeyDown={onFeedKey}>
-                {turns.length === 0 && <div className="empty">Type a prompt into the terminal — the conversation appears here.</div>}
-                {!allTurnsShown && turns.length > TURN_CAP && (
+              {(() => {
+                // Another session is waiting on you: say so here, so it isn't
+                // missed while you read this one.
+                const waiting = tabs.filter((x) => x.id !== activeTab.id && tabStatus(x).key === "attention");
+                if (!waiting.length) return null;
+                const first = waiting[0];
+                const fst = tabStatus(first);
+                const what = fst.label === "asked you" ? "has a question for you" : fst.label === "needs approval" ? "is waiting for your approval" : "may be waiting for you";
+                return (
+                  <div className="needs-bar" role="status">
+                    <StatusGlyph kind={glyphKind(fst, { lastKind: dash?.sessions?.[first.sessionId]?.stats?.lastKind })} size={14} />
+                    <span className="needs-text"><b>{tabDisplayName(first)}</b> {what}{waiting.length > 1 ? ` (and ${waiting.length - 1} more)` : ""}</span>
+                    <button className="needs-go" onClick={() => setActiveId(first.id)}>Go to it</button>
+                  </div>
+                );
+              })()}
+              <AgentName.Provider value={activeAgent.short}>
+              <ReaderActions.Provider value={readerActions}>
+              <div className="feed-uni" ref={feedRef} onScroll={onFeedScroll} onKeyDown={onFeedKey} inert={agentOpen ? "" : undefined}>
+                {turns.length === 0 && (
+                  <ReaderEmpty key={activeTab.id} agent={activeAgent.short} />
+                )}
+                {!allTurnsShown && !searching && turns.length > TURN_CAP && (
                   <button
                     className="show-earlier"
                     onClick={() => setShowAllTurns((s) => ({ ...s, [activeTab.id]: true }))}
                   >
-                    … show {turns.length - TURN_CAP} earlier turn(s)
+                    Show {turns.length - TURN_CAP} earlier turns
                   </button>
                 )}
                 {searching && visibleTurns.length === 0 && (
-                  <div className="empty">No turns mention “{searchQ.trim()}”.</div>
+                  <div className="reader-empty"><span>No turns mention “{searchQ.trim()}”.</span></div>
                 )}
                 {visibleTurns.map((t) => (
-                  <TurnCard
+                  <Turn
                     key={t.id}
                     t={t}
-                    expanded={searching ? !!overrides[t.id] : overrides[t.id] ?? t.id === latestId}
-                    live={t.id === latestId && busy}
+                    root={activeTab.cwd}
+                    bgMap={bgMap}
+                    expanded={searching ? !!overrides[t.id] : overrides[t.id] ?? openByDefault(t.id)}
+                    live={t.id === latestId && liveNow}
+                    latest={t.id === latestId}
+                    waiting={t.id === latestId && (activeStatus?.label === "waiting?" || activeStatus?.label === "needs approval")}
+                    waitingSure={activeStatus?.label === "needs approval"}
+                    pinned={pinList.includes(t.id)}
+                    activity={t.id === latestId ? liveActivity : null}
+                    detail={detail}
                     matchCount={searching ? searchMatches[t.id] : 0}
                     filters={filters}
                     catById={catById}
-                    onToggle={(id) => toggleTurn(id, searching ? !!overrides[id] : overrides[id] ?? id === latestId)}
+                    onToggle={(id) => toggleTurn(id, searching ? !!overrides[id] : overrides[id] ?? openByDefault(id))}
                   />
                 ))}
               </div>
+              </ReaderActions.Provider>
+              </AgentName.Provider>
+              <div className="sr-only" role="status" aria-live="polite">
+                {turns.length ? (liveNow ? `${activeAgent.short} is working` : bgRunning.length ? "Background work running" : `${activeAgent.short} is idle`) : ""}
+              </div>
+              <BackgroundStrip
+                tasks={bgRunning}
+                onJump={(id) => (bgMap[id]?.kind === "agent" ? setAgentOpen({ id, label: bgMap[id].label }) : jumpToStep(id))}
+              />
+              {agentOpen && (
+                <AgentPanel
+                  key={agentOpen.id}
+                  sessionId={activeTab.sessionId}
+                  toolUseId={agentOpen.id}
+                  label={agentOpen.label}
+                  running={agentRunning(agentOpen.id)}
+                  onClose={() => setAgentOpen(null)}
+                >
+                  {({ turns: agentTurns, live }) => (
+                    <AgentFeed turns={agentTurns} live={live} detail={detail === "answer" ? "steps" : detail} filters={filters} root={activeTab.cwd} />
+                  )}
+                </AgentPanel>
+              )}
               {unstuck && (
                 <button className="jump-bottom" onClick={jumpToLatest} title="Follow the latest activity">
-                  ↓ latest
+                  <Icon name="chevron" size={12} /> Latest
                 </button>
               )}
-              {error && <div className="error" role="button" title="Dismiss" onClick={() => setError("")}>{error} <span className="error-x">✕</span></div>}
+              {(() => {
+                // One card at the bottom of the conversation. A heads-up steps
+                // aside while the background-work strip is showing (they'd sit
+                // on top of each other) and comes back when it goes; an error
+                // stays, lifted above the strip.
+                const note = notices[activeTab.id];
+                const strip = bgRunning.length > 0;
+                const card = error
+                  ? { kind: "error", title: "Something went wrong", text: error, close: () => setError("") }
+                  : note && !(strip && note.kind === "warn")
+                  ? { ...note, close: () => setNotices((n) => { const x = { ...n }; delete x[activeTab.id]; return x; }) }
+                  : null;
+                if (!card) return null;
+                return (
+                  <div className={"notice-card " + card.kind + (strip ? " lifted" : "")} role={card.kind === "error" ? "alert" : "status"}>
+                    <span className="notice-ico" aria-hidden="true">{card.kind === "error" ? "!" : "i"}</span>
+                    <div className="notice-body"><b>{card.title}</b><span>{card.text}</span></div>
+                    <button className="notice-x" onClick={card.close} title="Dismiss" aria-label="Dismiss">✕</button>
+                  </div>
+                );
+              })()}
             </section>
           </div>
         </div>
+        <footer className="statusbar" aria-label="Session status">
+          {(() => {
+            const st = tabStatus(activeTab);
+            const label = busy ? "Working" : st.label.charAt(0).toUpperCase() + st.label.slice(1);
+            return (
+              <span className={"sb-state " + st.key} title={st.hint} role="status">
+                <StatusGlyph kind={busy && st.key !== "attention" ? glyphKind({ ...st, key: "working" }) : glyphKind(st, { lastKind: dash?.sessions?.[activeTab.sessionId]?.stats?.lastKind })} size={12} />
+                {label}
+                {st.key === "working" && liveActivity && <span className="sb-activity">{liveActivity}</span>}
+              </span>
+            );
+          })()}
+          {ready && <span className="sb-item">{turns.length} {turns.length === 1 ? "turn" : "turns"}</span>}
+          {bgRunning.length > 0 && <span className="sb-item">{bgRunning.length} in background</span>}
+          <span className="sb-path" title={activeTab.cwd}>
+            <ProjMark color={projectColor(activeTab.root || activeTab.cwd)} />
+            <span className="sb-path-text">{activeTab.cwd}</span>
+            {activeTab.branch && <span className="sb-branch">⌥ {activeTab.branch}</span>}
+          </span>
+          {usage && (usage.input > 0 || usage.output > 0) && (
+            <span
+              className="sb-item"
+              tabIndex={0}
+              title={`Input ${usage.input.toLocaleString()} · Output ${usage.output.toLocaleString()}\nCache read ${usage.cacheRead.toLocaleString()} · Cache write ${usage.cacheCreation.toLocaleString()}`}
+            >
+              {fmtTokens(usage.input + usage.cacheCreation)} in · {fmtTokens(usage.output)} out
+            </span>
+          )}
+          {ctxPct > 0 && (
+            <span
+              className={"sb-item sb-ctx" + (ctxPct >= 90 ? " red" : ctxPct >= 70 ? " orange" : ctxPct >= 50 ? " gold" : "")}
+              tabIndex={0}
+              aria-label={`Conversation ${ctxPct}% full`}
+              title={`How full this conversation is: about ${fmtTokens(ctxTokens)} of ${fmtTokens(ctxWin)} tokens.\n${activeAgent.short} compacts the conversation when it fills up.`}
+            >
+              <span className="sb-gauge"><span style={{ width: ctxPct + "%" }} /></span>
+              Context {ctxPct}%
+            </span>
+          )}
+        </footer>
       </div>
       {ctxMenu && (() => {
-        const t = tabs.find((x) => x.id === ctxMenu.id);
-        if (!t) return null;
+        const t = ctxMenu.group ? null : tabs.find((x) => x.id === ctxMenu.id);
+        const gKey = ctxMenu.group || (t && normRoot(t.root || t.cwd));
+        if (!gKey || (!t && !tabs.some((x) => normRoot(x.root || x.cwd) === gKey))) return null;
+        const pinItem = (
+          <button onClick={() => { togglePinProject(gKey); setCtxMenu(null); }}>
+            📌 {pinnedProj.includes(gKey) ? "Unpin project" : "Pin project to the top"}
+          </button>
+        );
+        if (!t) return (
+          <div className="ctx-overlay" onClick={() => setCtxMenu(null)} onContextMenu={(e) => { e.preventDefault(); setCtxMenu(null); }}>
+            <div className="ctx-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }} onClick={(e) => e.stopPropagation()}>{pinItem}</div>
+          </div>
+        );
         const name = tabDisplayName(t);
         return (
           <div
@@ -1637,6 +2119,7 @@ export default function App() {
               <button onClick={() => { invoke("clip_set", { text: t.cwd }).catch(() => {}); setCtxMenu(null); }}>
                 ⧉ Copy folder path
               </button>
+              {tabPos === "left" && pinItem}
               <button
                 className="danger"
                 onClick={() => { setCloseAction("keep"); setConfirmCloseId(t.id); setCtxMenu(null); }}
@@ -1649,7 +2132,7 @@ export default function App() {
       })()}
       {newOpen && (
         <div className="launch-overlay">
-          <Launch onStart={start} recent={recentList} onOpenSettings={() => openSettings("appearance")} onOpenBrowser={() => { setNewOpen(false); setBrowserOpen(true); }} onCancel={() => setNewOpen(false)} />
+          <Launch onStart={start} recent={recentList} filters={filters} onOpenSettings={() => openSettings("appearance")} onOpenBrowser={() => { setNewOpen(false); setBrowserOpen(true); }} onCancel={() => setNewOpen(false)} />
         </div>
       )}
       {confirmTab && (
@@ -1657,9 +2140,18 @@ export default function App() {
           <div className="confirm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
             <div className="confirm-title">Close session?</div>
             <div className="confirm-body">
-              This ends the Claude session in{" "}
-              <b>{tabDisplayName(confirmTab)}</b>{" "}
-              and closes its terminal.
+              {agentOf(confirmTab) === "codex" ? (
+                <>
+                  This closes the terminal for the Codex session in{" "}
+                  <b>{tabDisplayName(confirmTab)}</b>. A turn that is still running may carry on in the background; you can reopen the session from Resume.
+                </>
+              ) : (
+                <>
+                  This ends the Claude session in{" "}
+                  <b>{tabDisplayName(confirmTab)}</b>{" "}
+                  and closes its terminal.
+                </>
+              )}
             </div>
             {confirmTab.branch && (
               <div className="confirm-worktree">
@@ -1686,12 +2178,15 @@ export default function App() {
           dash={dash}
           busyById={busyById}
           rateLimits={rateLimits}
+          screenFor={screenFor}
           onJump={(id) => { setActiveId(id); setDashOpen(false); }}
           onClose={() => setDashOpen(false)}
         />
       )}
       {hotkeysOpen && <HotkeySheet onClose={() => setHotkeysOpen(false)} />}
-      {whatsNew && <WhatsNew version={whatsNew} onClose={() => setWhatsNew(null)} />}
+      {agentSetupOpen && <AgentSetup filters={filters} onDone={finishAgentSetup} />}
+      {!agentSetupOpen && whatsNew && <WhatsNew version={whatsNew} onClose={() => setWhatsNew(null)} />}
     </div>
+    </AgentName.Provider>
   );
 }

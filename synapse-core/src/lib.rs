@@ -9,6 +9,7 @@
 //! unit-tested fast and reused by both the desktop app and the CLI harness.
 
 pub mod budget;
+pub mod codex;
 pub mod diag;
 pub mod locks;
 pub mod mailbox;

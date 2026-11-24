@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { TOOL_CATS, BG_PRESETS, ACCENT_PRESETS, KIND_COLOR } from "./filters.js";
 import { useUpdateStatus, checkForUpdates, installUpdate, getUpdateCheckInfo, describeAgo } from "./updater.js";
+import { APP_ZOOM, TERM_FONT, READER_ZOOM, stepValue, pct } from "./textsize.js";
+import { DefaultAgentSetting } from "./AgentPicker.jsx";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -95,6 +97,19 @@ function Seg({ value, options, onChange }) {
 }
 
 // A card grouping related settings, with a heading outside the card.
+// − value + (and Reset when not at the default).
+function Stepper({ label, spec, value, fmt, onChange }) {
+  const v = value ?? spec.def;
+  return (
+    <span className="sm-stepper" role="group" aria-label={label}>
+      <button className="sm-btn" onClick={() => onChange(stepValue(spec, v, -1))} disabled={v <= spec.min} aria-label={`Smaller ${label}`}>−</button>
+      <span className="sm-stepper-val" aria-live="polite">{fmt(v)}</span>
+      <button className="sm-btn" onClick={() => onChange(stepValue(spec, v, 1))} disabled={v >= spec.max} aria-label={`Larger ${label}`}>+</button>
+      <button className="sm-btn ghost" onClick={() => onChange(spec.def)} disabled={v === spec.def} aria-label={`Reset ${label}`} title="Reset">↺</button>
+    </span>
+  );
+}
+
 function Group({ title, desc, actions, children, visible = true }) {
   if (!visible) return null;
   return (
@@ -181,23 +196,11 @@ function Swatches({ items, isOn, onPick, custom }) {
 
 // ─── data ───────────────────────────────────────────────────────────────────
 
-const CONVO = [
-  { key: "user", label: "User prompts", hint: "Your messages", color: KIND_COLOR.user },
-  { key: "text", label: "Messages", hint: "Claude's text replies", color: KIND_COLOR.message },
-  { key: "question", label: "Questions", hint: "Replies ending in a question mark", color: KIND_COLOR.question },
-  { key: "thinking", label: "Thinking", hint: "Internal reasoning blocks", color: KIND_COLOR.thinking },
-];
-const RESULTS = [
-  { key: "plan", label: "Plans", hint: "Proposed step lists from plan mode", color: KIND_COLOR.plan },
-  { key: "tool_result", label: "Tool results", hint: "Output returned by tool calls", color: KIND_COLOR.toolresult },
-  { key: "error", label: "Errors", hint: "Failed tool invocations", color: KIND_COLOR.error },
-];
-
 const NAV = [
   { key: "appearance", label: "Appearance", icon: "◐", desc: "Theme, accent, background" },
-  { key: "conversation", label: "Conversation", icon: "❯", desc: "Which messages appear" },
+  { key: "conversation", label: "Reader", icon: "❯", desc: "Level of detail, notes" },
   { key: "tools", label: "Tool calls", icon: "⚒", desc: "Category visibility" },
-  { key: "workspace", label: "Workspace", icon: "⌂", desc: "Launch, tabs, terminal" },
+  { key: "workspace", label: "Workspace", icon: "⌂", desc: "Agent, launch, tabs, terminal" },
   { key: "about", label: "About", icon: "ⓘ", desc: "Version & updates" },
 ];
 // Old keys still arrive from callers.
@@ -228,9 +231,9 @@ function StatuslineRow() {
         label="Usage limit chips"
         hint={
           !st ? "Checking…"
-          : active && st.configured === "ours" ? "Active — Synapse's hook caches the data after each Claude response"
+          : active && st.configured === "ours" ? "Active — HyperVoice Code's hook caches the data after each Claude response"
           : active ? "Active — your own status line already feeds the cache"
-          : st.configured === "other" ? "You have a custom status line; add Synapse's snippet to it"
+          : st.configured === "other" ? "You have a custom status line; add HyperVoice Code's snippet to it"
           : "Install a silent Claude Code hook so the session/weekly chips have data"
         }
         control={
@@ -254,7 +257,9 @@ function About({ onShowWhatsNew }) {
   // Last-check info refreshes with each status change so "checked just now"
   // appears right after the button is clicked.
   const [info, setInfo] = useState(null);
+  const [store, setStore] = useState(false);
   useEffect(() => { getVersion().then(setVersion).catch(() => {}); }, []);
+  useEffect(() => { invoke("get_install_source").then((v) => setStore(v === "store")).catch(() => {}); }, []);
   useEffect(() => { getUpdateCheckInfo().then(setInfo).catch(() => {}); }, [st]);
   const checked = info?.last_check_at ? `Last checked ${describeAgo(info.last_check_at)}.` : "";
   const hint =
@@ -270,7 +275,7 @@ function About({ onShowWhatsNew }) {
     <>
       <Item
         label="Version"
-        hint="Synapse — Claude Code Workspace"
+        hint="HyperVoice Code — a workspace for Claude Code and Codex"
         control={
           <span className="sm-version-row">
             <span className="sm-version">{version ? `v${version}` : "—"}</span>
@@ -280,6 +285,13 @@ function About({ onShowWhatsNew }) {
           </span>
         }
       />
+      {store ? (
+      <Item
+        label="Updates"
+        hint="This copy came from the Microsoft Store, which keeps it up to date."
+        control={<span className="sm-muted-note">Microsoft Store</span>}
+      />
+      ) : (
       <Item
         label="Updates"
         hint={hint}
@@ -299,6 +311,7 @@ function About({ onShowWhatsNew }) {
           )
         }
       />
+      )}
       <Item
         label="Data"
         hint="Settings live in this app only; transcripts stay in ~/.claude"
@@ -323,9 +336,10 @@ export default function SettingsModal({ open, onClose, filters, setFlag, setCat,
 
   useEffect(() => {
     if (!open) return;
-    const onKey = (e) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // Capture + stop: Esc closes Settings only, not the window it was opened from.
+    const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); onClose(); } };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [open, onClose]);
 
   const q = query.trim().toLowerCase();
@@ -335,9 +349,9 @@ export default function SettingsModal({ open, onClose, filters, setFlag, setCat,
   // Which nav sections contain a match (used to filter the rail while searching).
   const sectionHits = useMemo(() => ({
     appearance: hit("theme dark light system accent color background aurora speed"),
-    conversation: hit(CONVO.concat(RESULTS).map((r) => r.label + " " + r.hint).join(" ") + " feed behavior auto collapse on send message latest turn"),
+    conversation: hit("reader level of detail answer steps everything notes narration reading colours colors bold headings feed behavior auto collapse on send message latest turn"),
     tools: hit("tool calls categories filtered display dot pill hidden " + TOOL_CATS.map((c) => c.label).join(" ")),
-    workspace: hit("recent folders launch tabs position composer terminal dictation prompt notifications toast usage limits statusline"),
+    workspace: hit("agent claude codex default coding recent folders launch tabs position composer terminal dictation prompt notifications toast usage limits statusline"),
     about: hit("version updates check data local"),
   }), [q]);
 
@@ -366,7 +380,7 @@ export default function SettingsModal({ open, onClose, filters, setFlag, setCat,
       <div className="sm-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Settings">
         <aside className="sm-rail">
           <div className="sm-rail-brand">
-            <span className="logo-mark">◆</span> Synapse
+            <span className="logo-mark">◆</span> HyperVoice Code
             <span className="sm-rail-sub">Settings</span>
           </div>
           <div className="sm-search">
@@ -414,6 +428,17 @@ export default function SettingsModal({ open, onClose, filters, setFlag, setCat,
               <>
                 <Group title="Theme" desc="Panels and text — the terminal stays dark either way." visible={hit("theme dark light system")}>
                   <ThemeCards value={filters.theme || "dark"} onChange={(v) => setFlag("theme", v)} />
+                </Group>
+                <Group title="Text size" desc="Ctrl+scroll or Ctrl+= / Ctrl+- zoom everything; Ctrl+0 resets. The terminal and the conversation can also be sized on their own here." visible={hit("text size font zoom scale bigger smaller")}>
+                  <Item label="Window zoom" hint="Everything, including the top and status bars" control={
+                    <Stepper label="window zoom" spec={APP_ZOOM} value={filters.appZoom} fmt={pct} onChange={(v) => setFlag("appZoom", v)} />
+                  } />
+                  <Item label="Terminal text" hint="The terminal on the left" control={
+                    <Stepper label="terminal text" spec={TERM_FONT} value={filters.termFontSize} fmt={(v) => `${v}px`} onChange={(v) => setFlag("termFontSize", v)} />
+                  } />
+                  <Item label="Reading size" hint="The conversation on the right" control={
+                    <Stepper label="reading size" spec={READER_ZOOM} value={filters.readerZoom} fmt={pct} onChange={(v) => setFlag("readerZoom", v)} />
+                  } />
                 </Group>
                 <Group title="Accent" desc="Buttons, highlights, the active tab and the logo." visible={hit("accent color brand")}>
                   <div className="sm-pad">
@@ -482,17 +507,30 @@ export default function SettingsModal({ open, onClose, filters, setFlag, setCat,
 
             {showSection("conversation") && (
               <>
-                <Group title="Conversation" desc="Which message types appear in the feed.">
-                  {CONVO.filter((r) => hit(r.label, r.hint)).map((r) => (
-                    <ToggleItem key={r.key} color={r.color} label={r.label} hint={r.hint} checked={!!filters[r.key]} onChange={(v) => setFlag(r.key, v)} />
-                  ))}
+                <Group title="Detail" desc="How much of Claude's work you see." visible={hit("reader level of detail answer steps everything notes narration reading colours colors bold headings")}>
+                  <Item label="Level of detail" hint="Also on the conversation header. Answer folds the work into one line; Everything adds tool output and reasoning." control={
+                    <Seg
+                      value={filters.detail || "answer"}
+                      options={[{ v: "answer", l: "Answer" }, { v: "steps", l: "Steps" }, { v: "all", l: "Everything" }]}
+                      onChange={(v) => setFlag("detail", v)}
+                    />
+                  } />
+                  <ToggleItem
+                    color="#f5d27a"
+                    label="Reading colours"
+                    hint="Colour-code replies: bold in gold, headings in blue, inline code in teal. Off keeps replies in plain text colours."
+                    checked={filters.readingAccents !== false}
+                    onChange={(v) => setFlag("readingAccents", v)}
+                  />
+                  <ToggleItem
+                    color={KIND_COLOR.message}
+                    label="Notes between steps"
+                    hint="The short remarks the agent makes while it works (“Let me check the config…”). Shown in Steps and Everything."
+                    checked={filters.text !== false}
+                    onChange={(v) => setFlag("text", v)}
+                  />
                 </Group>
-                <Group title="Plans & results" desc="Claude's working artifacts.">
-                  {RESULTS.filter((r) => hit(r.label, r.hint)).map((r) => (
-                    <ToggleItem key={r.key} color={r.color} label={r.label} hint={r.hint} checked={!!filters[r.key]} onChange={(v) => setFlag(r.key, v)} />
-                  ))}
-                </Group>
-                <Group title="Feed behavior" desc="How the conversation reacts as you work." visible={hit("feed behavior auto collapse on send message latest turn")}>
+                <Group title="Feed behaviour" desc="How the conversation reacts as you work." visible={hit("feed behavior auto collapse on send message latest turn")}>
                   <ToggleItem
                     color={KIND_COLOR.user}
                     label="Collapse others when you send"
@@ -508,10 +546,10 @@ export default function SettingsModal({ open, onClose, filters, setFlag, setCat,
               <>
                 <Group title="Tool calls" desc="How tool activity renders in the feed." visible={hit("tool calls master filtered display dot pill hidden")}>
                   <ToggleItem color={KIND_COLOR.toolcall} label="Show tool calls" hint="Master toggle for all categories" checked={!!filters.tool_use} onChange={(v) => setFlag("tool_use", v)} />
-                  <Item label="Filtered tool display" hint="How filtered-out tool calls render" control={
+                  <Item label="Hidden categories" hint="Grouped shows them as one compact line of chips; Hidden removes them" control={
                     <Seg
-                      value={filters.filteredToolDisplay}
-                      options={[{ v: "dot", l: "Dot" }, { v: "pill", l: "Pill" }, { v: "hidden", l: "Hidden" }]}
+                      value={filters.filteredToolDisplay === "hidden" ? "hidden" : "pill"}
+                      options={[{ v: "pill", l: "Grouped" }, { v: "hidden", l: "Hidden" }]}
                       onChange={(v) => setFlag("filteredToolDisplay", v)}
                     />
                   } />
@@ -537,6 +575,9 @@ export default function SettingsModal({ open, onClose, filters, setFlag, setCat,
 
             {showSection("workspace") && (
               <>
+                <Group title="Coding agent" desc="Claude Code or Codex, in the terminal." visible={hit("agent claude codex default coding")}>
+                  <DefaultAgentSetting filters={filters} setFlag={setFlag} />
+                </Group>
                 <Group title="Launch" desc="The new-session screen." visible={hit("recent folders launch")}>
                   <Item label="Recent folders" hint="How many to list on the launch screen" control={
                     <Seg
@@ -549,22 +590,31 @@ export default function SettingsModal({ open, onClose, filters, setFlag, setCat,
                 <Group title="Tabs" desc="Session tab placement." visible={hit("tabs position top left")}>
                   <Item label="Tab position" hint="Top bar, or a left rail" control={
                     <Seg
-                      value={filters.tabPosition || "top"}
+                      value={filters.tabPosition || "left"}
                       options={[{ v: "top", l: "Top" }, { v: "left", l: "Left" }]}
                       onChange={(v) => setFlag("tabPosition", v)}
                     />
                   } />
                 </Group>
-                <Group title="Usage limits" desc="The session/weekly chips in the topbar." visible={hit("usage limits statusline chips rate session weekly hook")}>
+                <Group title="Usage limits" desc="The session/weekly chips in the topbar. Codex reports its own; Claude Code needs this hook." visible={hit("usage limits statusline chips rate session weekly hook")}>
                   <StatuslineRow />
                 </Group>
                 <Group title="Notifications" desc="Stay aware of background sessions." visible={hit("notifications toast finish background")}>
                   <ToggleItem
                     color="#FFC700"
-                    label="Notify when Claude finishes"
+                    label="Notify when a session finishes"
                     hint="Windows toast when a session completes work while you're in another tab or app"
                     checked={!!filters.notifyOnFinish}
                     onChange={(v) => setFlag("notifyOnFinish", v)}
+                  />
+                </Group>
+                <Group title="Start-up" desc="What HyperVoice Code opens with." visible={hit("restore reopen resume sessions tabs launch startup start-up")}>
+                  <ToggleItem
+                    color="#69db7c"
+                    label="Reopen my sessions on launch"
+                    hint="Brings back the tabs that were open when HyperVoice Code closed, each resumed with its full conversation. Work that was mid-run when it closed is not continued."
+                    checked={filters.restoreTabs !== false}
+                    onChange={(v) => setFlag("restoreTabs", v)}
                   />
                 </Group>
                 <Group title="Terminal" desc="The embedded console." visible={hit("composer terminal dictation prompt input")}>

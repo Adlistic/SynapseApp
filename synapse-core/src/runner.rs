@@ -157,6 +157,10 @@ impl AgentHandle for MockHandle {
             session_id: Some(self.session_id.clone()),
             ts: now_ms(),
             edit_data: None,
+            input: None,
+            mid_turn: false,
+            desc: None,
+            at: None,
         };
         let _ = self.tx.send(AgentEvent::Message(msg));
         let _ = self.tx.send(AgentEvent::Status(AgentStatus::Done));

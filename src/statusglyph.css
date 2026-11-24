@@ -1,0 +1,58 @@
+/* StatusGlyph: see src/StatusGlyph.jsx. Four looks only, each answering
+   "do I need to do anything?":
+     working   a small green orb with a comet sweeping round it (busy)
+     needs you a full amber disc with a readable "!", "?" or plan mark
+     new       a solid blue dot (finished while you were on another tab)
+     idle      a faint dot (nothing happening)
+   What a working session is doing ("thinking", "Bash", "2 agents") is a word
+   on the tab, not a different icon. */
+.sg {
+  --c: #69db7c; --c2: #b2f2bb; --hi: rgba(255, 255, 255, 0.85);
+  position: relative; display: inline-block; flex: none;
+  width: var(--sg); height: var(--sg); vertical-align: middle;
+}
+.sg > span { position: absolute; inset: 0; border-radius: 50%; display: none; }
+.sg .sg-core {
+  display: grid; place-items: center; inset: 31%;
+  background: radial-gradient(circle at 35% 30%, var(--hi) 0 12%, var(--c2) 30%, var(--c) 70%, color-mix(in srgb, var(--c) 70%, #000) 100%);
+  box-shadow: 0 0 calc(var(--sg) * 0.35) color-mix(in srgb, var(--c) 70%, transparent);
+}
+.sg .sg-core svg { width: 100%; height: 100%; fill: none; stroke: #241900; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.sg .sg-core svg circle { fill: #241900; stroke-width: 1.4; }
+
+/* working: comet sweep + breathing core */
+.sg-working .sg-ring {
+  display: block;
+  --band: max(1.5px, calc(var(--sg) * 0.14));
+  background: conic-gradient(from 0deg, transparent 0 40%, color-mix(in srgb, var(--c) 60%, transparent) 80%, var(--c2) 100%);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - var(--band)), #000 calc(100% - var(--band) + 0.5px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - var(--band)), #000 calc(100% - var(--band) + 0.5px));
+  animation: sgSpin 0.9s linear infinite;
+}
+.sg-working .sg-ring.two { display: none; }
+.sg-working .sg-core { animation: sgBreathe 1.8s ease-in-out infinite; }
+
+/* needs you: the whole glyph is the disc; a gentle nudge, no rings */
+.sg-approve, .sg-ask, .sg-plan { --c: #ffc700; --c2: #ffe066; }
+.sg-approve .sg-core, .sg-ask .sg-core, .sg-plan .sg-core { inset: 0; animation: sgNudge 1.8s ease-in-out infinite; }
+
+/* new: a solid blue dot */
+.sg-new { --c: var(--accent, #27b8fd); --c2: #a5e3ff; }
+.sg-new .sg-core { inset: 22%; }
+
+/* idle: a faint dot */
+.sg-idle .sg-core { inset: 36%; background: var(--muted, #7d88a3); box-shadow: none; opacity: 0.55; }
+
+:root[data-theme="light"] .sg { --hi: rgba(255, 255, 255, 0.9); }
+:root[data-theme="light"] .sg-working { --c: #15803d; --c2: #4ade80; }
+:root[data-theme="light"] .sg-approve, :root[data-theme="light"] .sg-ask, :root[data-theme="light"] .sg-plan { --c: #e8a200; --c2: #fcc419; }
+:root[data-theme="light"] .sg-new { --c: #0b6fb8; --c2: #74c0fc; }
+:root[data-theme="light"] .sg-idle .sg-core { opacity: 0.7; }
+
+@keyframes sgSpin { to { transform: rotate(360deg); } }
+@keyframes sgBreathe { 0%, 100% { transform: scale(0.9); } 50% { transform: scale(1.08); } }
+@keyframes sgNudge { 0%, 100% { transform: scale(1); } 12% { transform: scale(1.12); } 24% { transform: scale(0.97); } 36% { transform: scale(1); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .sg > span { animation: none !important; }
+}

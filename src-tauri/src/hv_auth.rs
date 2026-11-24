@@ -140,7 +140,7 @@ pub async fn get_entitlement() -> Result<Value, String> {
     // Bounded timeouts so a captive portal / half-open connection can't hang the
     // whole app on "Checking your account…" (reqwest has NO default timeout).
     let client = reqwest::Client::builder()
-        .user_agent("Synapse-Suite")
+        .user_agent("HyperVoiceCode")
         .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(8))
         .build()
@@ -207,9 +207,20 @@ pub async fn get_entitlement() -> Result<Value, String> {
     }))
 }
 
+/// Must match FREE_FOR_ALL in src/AuthGate.jsx.
+pub const FREE_FOR_ALL: bool = true;
+
 /// Parse a `synapse://claim?token=...` deep-link URL and persist the token.
 /// Returns the token on success so the caller can notify the frontend.
 pub fn handle_claim_url(url: &str) -> Option<String> {
+    // HyperVoice Code is free with no sign-in (mirrors FREE_FOR_ALL in
+    // src/AuthGate.jsx). Ignore claim links entirely so a web page can't plant
+    // a token. Before re-enabling: verify the nonce from auth_begin_signin and
+    // stop emitting the raw token to the webview.
+    if FREE_FOR_ALL {
+        let _ = url;
+        return None;
+    }
     // Accept `synapse://claim?token=XXX` (and tolerate extra params).
     let after = url.split('?').nth(1)?;
     for pair in after.split('&') {

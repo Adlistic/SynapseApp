@@ -17,6 +17,8 @@ pub struct SessionMeta {
     pub cwd: String,
     pub modified_ms: i64,
     pub size_bytes: u64,
+    /// Which CLI the session belongs to: "claude" or "codex".
+    pub agent: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -91,6 +93,7 @@ fn meta_for(p: &Path) -> Option<SessionMeta> {
         cwd,
         modified_ms,
         size_bytes: fs_meta.len(),
+        agent: "claude",
     })
 }
 
@@ -159,9 +162,11 @@ pub async fn search_sessions(query: String) -> Vec<SearchHit> {
     if q.chars().count() < 2 {
         return Vec::new();
     }
-    let Some(root) = crate::claude_projects_dir() else { return Vec::new() };
-    let Ok(projects) = std::fs::read_dir(&root) else { return Vec::new() };
     let mut hits: Vec<SearchHit> = Vec::new();
+    let projects = crate::claude_projects_dir()
+        .and_then(|root| std::fs::read_dir(root).ok())
+        .into_iter()
+        .flatten();
     'outer: for proj in projects.filter_map(|e| e.ok()) {
         let Ok(files) = std::fs::read_dir(proj.path()) else { continue };
         for f in files.filter_map(|e| e.ok()) {
@@ -217,6 +222,11 @@ pub async fn search_sessions(query: String) -> Vec<SearchHit> {
                 }
             }
         }
+    }
+    // Codex sessions too, within the same overall cap.
+    if hits.len() < 50 {
+        let room = 50 - hits.len();
+        hits.extend(crate::codex::search(&q, room));
     }
     hits.sort_by(|a, b| b.meta.modified_ms.cmp(&a.meta.modified_ms));
     hits

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Microsoft Store (MSIX) manifest for HyperVoice Code. build-store.ps1 fills in
+  {{VERSION}} (x.y.z.0 from tauri.conf.json) and {{EXE}}.
+
+  Identity Name / Publisher MUST match Partner Center → HyperVoice Code →
+  Product identity exactly, or the Store rejects the upload. Publisher is the
+  same CN as HyperVoice (same Partner Center account); Name is a placeholder
+  until the "HyperVoice Code" reservation exists — check it then.
+
+  - runFullTrust: a normal Win32 desktop app (runs the user's `claude` CLI in a
+    ConPTY terminal, reads ~/.claude transcripts, git worktrees).
+  - No protocol extension: the Store build is free with no sign-in, so the
+    synapse:// account-link deep link isn't needed.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+
+  <Identity
+    Name="ChrisCousens.HyperVoiceCode"
+    Publisher="CN=F35DDA76-0392-43C2-9FA0-35C438330A01"
+    Version="{{VERSION}}"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>HyperVoice Code</DisplayName>
+    <PublisherDisplayName>Chris Cousens</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>A workspace for Claude Code: the real terminal beside a readable conversation.</Description>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.18362.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="HyperVoiceCode" Executable="{{EXE}}" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="HyperVoice Code"
+        Description="A workspace for Claude Code"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Square71x71Logo="Assets\Square71x71Logo.png" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

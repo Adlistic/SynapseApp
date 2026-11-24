@@ -62,14 +62,20 @@ export const DEFAULT_FILTERS = {
   filteredToolDisplay: "dot", // "dot" = collapse to a marker, "hidden" = remove
   recentFoldersLimit: 5, // how many recent folders to list on the launch screen
   backgroundMode: "none", // "none" | "color" | "aurora"
+  appZoom: 1, // whole-window zoom (Ctrl+= / Ctrl+- / Ctrl+0)
+  termFontSize: 13, // terminal text, px (Ctrl+scroll over the terminal)
+  readerZoom: 1, // conversation reader scale (Ctrl+scroll over it)
   backgroundColor: { h: 222, s: 47, l: 11 },
   warpSpeed: 1, // aurora blob speed: 0 (off) | 0.5 | 1 | 2 | 4
-  tabPosition: "top", // "top" | "left"
+  tabPosition: "left", // "left" (default) | "top"
   showComposer: false, // input box under the terminal (off = type in the console)
+  restoreTabs: true, // on launch, reopen the sessions that were open when the app closed
   autoCollapseOnSend: false, // on a new message, collapse all turns but the one just sent
   theme: "dark", // "dark" | "light" | "system"
   accent: null, // custom accent hex (null = palette default)
   notifyOnFinish: true, // Windows toast when a background session finishes work
+  detail: "answer", // reader detail level: "answer" | "steps" | "all"
+  readingAccents: true, // colour-coded bold / headings / code in replies
 };
 
 // Accent presets (applied to --accent). First = the HyperVoice brand default
@@ -171,7 +177,7 @@ function hexParts(hex) {
 export function displayColor(hex, light) {
   if (!light) return hex;
   const { h, s } = hexParts(hex);
-  return `hsl(${h} ${Math.min(Math.round(s * 1.2), 90)}% 34%)`;
+  return `hsl(${h} ${Math.min(Math.round(s * 1.2), 90)}% 28%)`;
 }
 
 // Badge styling for the tool pills: tinted background + readable text/border

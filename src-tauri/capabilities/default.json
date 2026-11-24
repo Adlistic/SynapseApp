@@ -1,18 +1,18 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability set for the Synapse main window.",
+  "description": "Default capability set for the HyperVoice Code main window.",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:default",
+    "core:webview:allow-set-webview-zoom",
     "core:app:default",
     "core:event:default",
     "dialog:default",
     "dialog:allow-open",
     "dialog:allow-ask",
     "deep-link:default",
-    "updater:default",
     "process:default",
     "process:allow-restart",
     "notification:default"

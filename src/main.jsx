@@ -2,6 +2,8 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App.jsx";
 import AuthGate from "./AuthGate.jsx";
+import "@fontsource-variable/inter";
+import "@fontsource-variable/jetbrains-mono";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 
@@ -16,7 +18,7 @@ class ErrorBoundary extends React.Component {
     return { error };
   }
   componentDidCatch(error, info) {
-    console.error("Synapse render crash:", error, info?.componentStack);
+    console.error("HyperVoice Code render crash:", error, info?.componentStack);
   }
   render() {
     if (this.state.error) {
@@ -25,7 +27,7 @@ class ErrorBoundary extends React.Component {
           <div className="crash-card">
             <div className="crash-title">Something broke in the UI</div>
             <pre className="crash-detail">{String(this.state.error?.message || this.state.error)}</pre>
-            <button className="crash-btn" onClick={() => window.location.reload()}>↻ Reload Synapse</button>
+            <button className="crash-btn" onClick={() => window.location.reload()}>↻ Reload HyperVoice Code</button>
           </div>
         </div>
       );

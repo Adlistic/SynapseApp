@@ -63,7 +63,13 @@ pub fn term_open(
     // Mark this shell (and anything launched in it, e.g. `claude`) as running
     // inside Synapse, so an env-aware status line can hide itself here while
     // staying visible in a normal terminal.
+    cmd.env("HYPERVOICE_CODE_TERMINAL", "1");
+    // The old name too, for status-line scripts written before the rename.
     cmd.env("SYNAPSE_TERMINAL", "1");
+    // The embedded xterm.js understands 256 colours and truecolor; say so, so
+    // `claude` (and anything else run here) draws in colour.
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
     // If Synapse itself was launched from inside a Claude Code session (e.g.
     // `tauri dev` driven by Claude), the inherited child-session markers make
     // the embedded `claude` treat itself as a nested session and skip
@@ -72,6 +78,11 @@ pub fn term_open(
     // first-class one, and force persistence as a backstop.
     cmd.env_remove("CLAUDE_CODE_CHILD_SESSION");
     cmd.env_remove("CLAUDECODE");
+    // Claude Code runs its tool commands with NO_COLOR=1; when Synapse was
+    // started from one of those, the embedded `claude` inherited it and drew
+    // plain white-on-black. Colour is always wanted here.
+    cmd.env_remove("NO_COLOR");
+    cmd.env_remove("NODE_DISABLE_COLORS");
     cmd.env("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE", "1");
     if let Some(dir) = cwd.as_ref().filter(|d| !d.trim().is_empty()) {
         if std::path::Path::new(dir).is_dir() {

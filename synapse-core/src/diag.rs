@@ -113,7 +113,7 @@ pub fn init(log_dir: &Path, console: bool) -> std::io::Result<(LogGuard, LogBuff
     // The daily-rolling appender never deletes old files, so a long-lived install
     // would accumulate one `synapse.log.<date>` per day forever. Cap retention.
     prune_old_logs(log_dir, 14);
-    let file_appender = tracing_appender::rolling::daily(log_dir, "synapse.log");
+    let file_appender = tracing_appender::rolling::daily(log_dir, "hypervoice-code.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     let buf: LogBuffer = Arc::new(Mutex::new(Vec::new()));
@@ -181,7 +181,7 @@ fn prune_old_logs(log_dir: &Path, keep: usize) {
         .filter(|e| {
             e.file_name()
                 .to_str()
-                .map(|n| n.starts_with("synapse.log"))
+                .map(|n| n.starts_with("hypervoice-code.log") || n.starts_with("synapse.log"))
                 .unwrap_or(false)
         })
         .filter_map(|e| {
@@ -198,13 +198,13 @@ fn prune_old_logs(log_dir: &Path, keep: usize) {
     }
 }
 
-/// The default log directory: `~/.synapse/logs`.
+/// The default log directory: `~/.hypervoice-code/logs` (the desktop app's folder).
 pub fn default_log_dir() -> std::path::PathBuf {
     let home = std::env::var("USERPROFILE")
         .ok()
         .or_else(|| std::env::var("HOME").ok())
         .unwrap_or_else(|| ".".to_string());
-    std::path::Path::new(&home).join(".synapse").join("logs")
+    std::path::Path::new(&home).join(".hypervoice-code").join("logs")
 }
 
 #[cfg(test)]

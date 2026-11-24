@@ -22,7 +22,7 @@ pub fn categorize_tool(name: &str) -> ToolCategory {
         return ToolCategory::Mcp;
     }
     match name {
-        "Bash" | "BashOutput" | "KillShell" | "KillBash" => ToolCategory::Shell,
+        "Bash" | "BashOutput" | "KillShell" | "KillBash" | "PowerShell" | "Monitor" => ToolCategory::Shell,
         "Read" | "NotebookRead" => ToolCategory::FileRead,
         "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => ToolCategory::FileWrite,
         "Glob" | "Grep" | "LS" => ToolCategory::Search,
@@ -74,6 +74,13 @@ fn tool_preview(name: &str, input: &Value) -> String {
         "WebFetch" => pick(&["url"]),
         "WebSearch" => pick(&["query"]),
         "Task" => pick(&["description", "subject"]),
+        // The question itself, so the step reads as what Claude asked.
+        "AskUserQuestion" => input
+            .get("questions")
+            .and_then(|q| q.get(0))
+            .and_then(|q| q.get("question"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
         _ => None,
     }
     .or_else(|| pick(&["description", "subject", "command", "pattern", "query", "url", "file_path", "path"]))
@@ -87,6 +94,26 @@ fn tool_preview(name: &str, input: &Value) -> String {
     } else {
         one_line
     }
+}
+
+/// The plain-English line Claude wrote for a tool call — the `description`
+/// Bash (and PowerShell) carry ("Seeing whether the to-do panel already links
+/// interview prep"). None when there isn't one, or when the preview already IS
+/// the description (Task/Agent), so the reader never shows it twice.
+fn tool_desc(name: &str, input: &Value, preview: &str) -> Option<String> {
+    if matches!(name, "Task" | "Agent") {
+        return None;
+    }
+    let d = input.get("description")?.as_str()?;
+    let one_line = d.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.is_empty() || one_line == preview {
+        return None;
+    }
+    Some(if one_line.chars().count() > 160 {
+        format!("{}…", one_line.chars().take(160).collect::<String>())
+    } else {
+        one_line
+    })
 }
 
 /// Parse a single JSONL line into zero or more messages. `ts` is the fallback
@@ -104,9 +131,55 @@ pub fn parse_line(line: &str, ts: i64, agent_id: Option<&str>) -> Vec<Message> {
     parse_entry(&entry, ts, agent_id)
 }
 
+/// Parse an RFC 3339 UTC timestamp like `2026-10-27T21:52:03.123Z` (the shape
+/// Claude Code writes) to epoch milliseconds. Offsets other than `Z`/`+00:00`
+/// are applied; anything malformed returns None.
+pub fn parse_rfc3339_ms(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || (b[10] != b'T' && b[10] != b' ') || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| -> Option<i64> { s.get(r)?.parse().ok() };
+    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (h, mi, se) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || se > 60 {
+        return None;
+    }
+    let mut i = 19;
+    let mut ms = 0i64;
+    if b.get(i) == Some(&b'.') {
+        i += 1;
+        let start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        let frac = s.get(start..i)?;
+        let take = &frac[..frac.len().min(3)];
+        ms = format!("{take:0<3}").parse().ok()?;
+    }
+    let offset_min = match s.get(i..)? {
+        "Z" | "z" | "" => 0,
+        o if o.len() == 6 && (o.starts_with('+') || o.starts_with('-')) && &o[3..4] == ":" => {
+            let v = o[1..3].parse::<i64>().ok()? * 60 + o[4..6].parse::<i64>().ok()?;
+            if o.starts_with('-') { -v } else { v }
+        }
+        _ => return None,
+    };
+    // Days since the Unix epoch (Howard Hinnant's days_from_civil).
+    let y2 = if mo <= 2 { y - 1 } else { y };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let mp = (mo + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Some(((days * 86400 + h * 3600 + mi * 60 + se) - offset_min * 60) * 1000 + ms)
+}
+
 /// Parse an already-decoded JSON entry.
 pub fn parse_entry(entry: &Value, ts: i64, agent_id: Option<&str>) -> Vec<Message> {
     let session_id = extract_session_id(entry);
+    let at = entry.get("timestamp").and_then(|v| v.as_str()).and_then(parse_rfc3339_ms);
     let agent = agent_id.map(String::from);
     let mut out = Vec::new();
 
@@ -122,6 +195,57 @@ pub fn parse_entry(entry: &Value, ts: i64, agent_id: Option<&str>) -> Vec<Messag
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
     {
+        return out;
+    }
+
+    // A prompt typed while Claude was working. Claude Code records it as a
+    // `queued_command` attachment (no `message`), and hands it to the model
+    // wrapped in boilerplate; the reader shows just what the user typed.
+    if entry_type == "attachment" {
+        let a = match entry.get("attachment") {
+            Some(a) => a,
+            None => return out,
+        };
+        let is = |k: &str, v: &str| a.get(k).and_then(|x| x.as_str()) == Some(v);
+        let human = a.get("origin").and_then(|o| o.get("kind")).and_then(|x| x.as_str()) == Some("human");
+        // A background task reporting back mid-turn is queued the same way; the
+        // reader needs it to know the task has ended.
+        let notice = is("commandMode", "task-notification");
+        if is("type", "queued_command") && ((is("commandMode", "prompt") && human) || notice) {
+            if let Some(p) = a.get("prompt").and_then(|x| x.as_str()).filter(|p| !p.trim().is_empty()) {
+                out.push(Message {
+                    id: entry
+                        .get("uuid")
+                        .and_then(|v| v.as_str())
+                        .map(|u| format!("{u}-0"))
+                        .unwrap_or_else(new_id),
+                    role: "user".to_string(),
+                    kind: MessageKind::User,
+                    text: p.to_string(),
+                    tool_name: None,
+                    tool_category: None,
+                    tool_use_id: None,
+                    is_error: false,
+                    agent_id: agent.clone(),
+                    session_id: session_id.clone(),
+                    ts,
+                    edit_data: None,
+                    input: None,
+                    mid_turn: !notice,
+                    desc: None,
+                    at,
+                });
+            }
+        }
+        return out;
+    }
+
+    // Only real conversation entries are shown. Claude Code also logs the raw
+    // API requests it makes (`api-request-blob`, …) with a `message` of their
+    // own: copies of calls and results already in the transcript, plus system
+    // notes the user never sees. Rendering those doubles the work and shows
+    // harness text as if someone had said it.
+    if !entry_type.is_empty() && entry_type != "user" && entry_type != "assistant" {
         return out;
     }
 
@@ -153,6 +277,10 @@ pub fn parse_entry(entry: &Value, ts: i64, agent_id: Option<&str>) -> Vec<Messag
         session_id: session_id.clone(),
         ts,
         edit_data: None,
+        input: None,
+        mid_turn: false,
+        desc: None,
+        at,
     };
 
     match content {
@@ -215,10 +343,16 @@ pub fn parse_entry(entry: &Value, ts: i64, agent_id: Option<&str>) -> Vec<Messag
                             out.push(m);
                             continue;
                         }
-                        let mut m = mk(MessageKind::ToolCall, tool_preview(&name, &input));
+                        let preview = tool_preview(&name, &input);
+                        let desc = tool_desc(&name, &input, &preview);
+                        let mut m = mk(MessageKind::ToolCall, preview);
+                        m.desc = desc;
                         m.tool_category = Some(categorize_tool(&name));
                         if is_edit_tool(&name) {
                             m.edit_data = Some(input.clone());
+                        }
+                        if name == "AskUserQuestion" {
+                            m.input = Some(input.clone());
                         }
                         m.tool_name = Some(name);
                         m.tool_use_id = tool_use_id;
@@ -305,7 +439,40 @@ fn stringify_result(content: Option<&Value>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rfc3339_timestamps() {
+        assert_eq!(parse_rfc3339_ms("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_rfc3339_ms("2026-10-27T21:52:03.123Z"), Some(1_793_137_923_123));
+        assert_eq!(parse_rfc3339_ms("2000-02-29T12:00:00.5Z"), Some(951_825_600_500));
+        assert_eq!(parse_rfc3339_ms("2026-10-27T23:52:03.123+02:00"), Some(1_793_137_923_123));
+        assert_eq!(parse_rfc3339_ms("garbage"), None);
+        assert_eq!(parse_rfc3339_ms("2026-13-01T00:00:00Z"), None);
+        let line = r#"{"type":"assistant","timestamp":"2026-10-27T21:52:03.123Z","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#;
+        assert_eq!(parse_line(line, 1, None)[0].at, Some(1_793_137_923_123));
+    }
+
     use super::*;
+
+    #[test]
+    fn tool_calls_keep_their_plain_english_description() {
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"b1","name":"Bash","input":{"command":"cd /x && grep -n foo a.cs","description":"Seeing whether the\n to-do panel links interview prep"}},
+            {"type":"tool_use","id":"b2","name":"Bash","input":{"command":"ls"}},
+            {"type":"tool_use","id":"t1","name":"Task","input":{"description":"explore auth","prompt":"p"}},
+            {"type":"tool_use","id":"w1","name":"Mystery","input":{"description":"only a description"}}
+        ]}}"#;
+        let m = parse_line(line, 1, None);
+        assert_eq!(m[0].text, "cd /x && grep -n foo a.cs");
+        assert_eq!(m[0].desc.as_deref(), Some("Seeing whether the to-do panel links interview prep"));
+        assert_eq!(m[1].desc, None);
+        // Task's preview already is its description: not repeated.
+        assert_eq!(m[2].text, "explore auth");
+        assert_eq!(m[2].desc, None);
+        assert_eq!(m[3].text, "only a description");
+        assert_eq!(m[3].desc, None);
+        // Absent on the wire when there is none, so old payloads stay identical.
+        assert!(!serde_json::to_string(&m[1]).unwrap().contains("desc"));
+    }
 
     #[test]
     fn categorizes_tools() {
@@ -317,6 +484,42 @@ mod tests {
         assert_eq!(categorize_tool("mcp__synapse__spawn_agent"), ToolCategory::Mcp);
         assert_eq!(categorize_tool("EnterWorktree"), ToolCategory::Worktrees);
         assert_eq!(categorize_tool("SomethingNew"), ToolCategory::Other);
+    }
+
+    #[test]
+    fn request_logs_are_not_conversation() {
+        // Raw API request copies carry a `message` but are not transcript turns.
+        for line in [
+            r#"{"type":"api-request-blob","sessionId":"s1","hash":"h","message":{"role":"user","content":[{"type":"text","text":"The user sent a new message while you were working:\nhello"}]}}"#,
+            r#"{"type":"api-request-blob","sessionId":"s1","hash":"h","message":{"role":"system","content":[{"type":"text","text":"Environment update"}]}}"#,
+            r#"{"type":"api-request-blob","sessionId":"s1","hash":"h","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#,
+        ] {
+            assert!(parse_line(line, 1, None).is_empty(), "{line}");
+        }
+    }
+
+    #[test]
+    fn message_sent_mid_turn_is_the_users_own_words() {
+        let line = r#"{"type":"attachment","uuid":"u9","timestamp":"2026-11-03T09:42:59.019Z","attachment":{"type":"queued_command","prompt":"use the e drive","commandMode":"prompt","origin":{"kind":"human"}}}"#;
+        let msgs = parse_line(line, 1, None);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].kind, MessageKind::User);
+        assert_eq!(msgs[0].text, "use the e drive");
+        assert_eq!(msgs[0].id, "u9-0");
+        assert!(msgs[0].mid_turn);
+        assert!(msgs[0].at.is_some());
+        // A background task's "finished" notice comes through, but not as the user's words.
+        let done = parse_line(r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification><tool-use-id>t1</tool-use-id><status>completed</status></task-notification>","commandMode":"task-notification"}}"#, 1, None);
+        assert_eq!(done.len(), 1);
+        assert!(done[0].text.contains("<tool-use-id>t1</tool-use-id>"));
+        assert!(!done[0].mid_turn);
+        // Agent hand-backs and other attachments are not shown.
+        for other in [
+            r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"report","commandMode":"prompt","origin":{"kind":"peer"}}}"#,
+            r#"{"type":"attachment","attachment":{"type":"edited_text_file","prompt":"x"}}"#,
+        ] {
+            assert!(parse_line(other, 1, None).is_empty(), "{other}");
+        }
     }
 
     #[test]
@@ -373,6 +576,21 @@ mod tests {
         assert_eq!(m[0].kind, MessageKind::Error);
         assert!(m[0].is_error);
         assert_eq!(m[0].text, "boom");
+    }
+
+    #[test]
+    fn ask_user_question_keeps_its_options() {
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{"questions":[{"question":"Which one?","header":"Pick","multiSelect":false,"options":[{"label":"A","description":"first"},{"label":"B","description":"second"}]}]}}
+        ]}}"#;
+        let msgs = parse_line(line, 1, None);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].text, "Which one?");
+        let input = msgs[0].input.as_ref().expect("input kept");
+        assert_eq!(input["questions"][0]["options"][1]["label"], "B");
+        // Other tools don't carry their input.
+        let other = parse_line(r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"b","name":"Bash","input":{"command":"ls"}}]}}"#, 1, None);
+        assert!(other[0].input.is_none());
     }
 
     #[test]

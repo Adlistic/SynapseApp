@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    synapse_desktop_lib::run()
+    hypervoice_code_lib::run()
 }

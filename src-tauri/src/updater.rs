@@ -108,6 +108,10 @@ pub fn start(app: &AppHandle) {
 /// Check for an update and, if there is one, download it in the background.
 /// `force` skips the 30-minute throttle (the Settings button).
 pub async fn check(app: AppHandle, force: bool) -> UpdateStatus {
+    // Store installs are updated by the Store (see packaging.rs).
+    if crate::packaging::is_packaged() {
+        return status(&app);
+    }
     {
         let state = app.state::<crate::AppState>();
         let mut slot = state.update.lock();
@@ -280,6 +284,9 @@ pub async fn check_for_updates(app: AppHandle, force: bool) -> UpdateStatus {
 
 #[tauri::command]
 pub async fn install_update(app: AppHandle) -> Result<(), String> {
+    if crate::packaging::is_packaged() {
+        return Err("This copy is updated by the Microsoft Store.".into());
+    }
     install_and_restart(&app)
 }
 
@@ -333,7 +340,7 @@ pub async fn get_release_notes_since(app: AppHandle) -> Result<Vec<ReleaseNotes>
     let releases: Vec<serde_json::Value> = client
         .get("https://api.github.com/repos/Adlistic/SynapseApp/releases?per_page=30")
         // GitHub's API rejects requests without a User-Agent.
-        .header("User-Agent", "Synapse-updater")
+        .header("User-Agent", "HyperVoiceCode-updater")
         .header("Accept", "application/vnd.github+json")
         .send()
         .await

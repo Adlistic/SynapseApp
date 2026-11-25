@@ -209,7 +209,8 @@ pub fn parse_entry(entry: &Value, ts: i64, agent_id: Option<&str>) -> Vec<Messag
         let is = |k: &str, v: &str| a.get(k).and_then(|x| x.as_str()) == Some(v);
         let human = a.get("origin").and_then(|o| o.get("kind")).and_then(|x| x.as_str()) == Some("human");
         // A background task reporting back mid-turn is queued the same way; the
-        // reader needs it to know the task has ended.
+        // reader needs it to know the task has ended. Both arrived while Claude
+        // was working, so both are mid-turn.
         let notice = is("commandMode", "task-notification");
         if is("type", "queued_command") && ((is("commandMode", "prompt") && human) || notice) {
             if let Some(p) = a.get("prompt").and_then(|x| x.as_str()).filter(|p| !p.trim().is_empty()) {
@@ -231,7 +232,7 @@ pub fn parse_entry(entry: &Value, ts: i64, agent_id: Option<&str>) -> Vec<Messag
                     ts,
                     edit_data: None,
                     input: None,
-                    mid_turn: !notice,
+                    mid_turn: true,
                     desc: None,
                     at,
                 });
@@ -512,7 +513,7 @@ mod tests {
         let done = parse_line(r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification><tool-use-id>t1</tool-use-id><status>completed</status></task-notification>","commandMode":"task-notification"}}"#, 1, None);
         assert_eq!(done.len(), 1);
         assert!(done[0].text.contains("<tool-use-id>t1</tool-use-id>"));
-        assert!(!done[0].mid_turn);
+        assert!(done[0].mid_turn);
         // Agent hand-backs and other attachments are not shown.
         for other in [
             r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"report","commandMode":"prompt","origin":{"kind":"peer"}}}"#,

@@ -46,6 +46,13 @@ export function groupTurns(messages) {
       const isNotif = /^\s*<task-notification>|^\s*\[SYSTEM NOTIFICATION/i.test(text);
       const cleaned = cmd ? cmd[1].trim() : isNotif ? "" : stripReminders(stripAnsi(text));
       if (!cmd && !isNotif && !cleaned) continue; // pure injection — not a real turn
+      // A background task that reports back while Claude is still working is
+      // handed over inside the same run; the rest of the answer still belongs
+      // to your question, so show it as a step there, not as a new turn.
+      if (isNotif && m.midTurn && cur) {
+        cur.responses.push({ ...m, kind: "toolresult", toolName: "output", text: notifSummary(text) });
+        continue;
+      }
       if (/^\[Request interrupted by user/.test(cleaned) && cur) {
         cur.interrupted = true;
         continue;

@@ -843,8 +843,11 @@ export default function App() {
       }
       setConvos((c) => {
         const prev = c[t.id] || { messages: [], ready: false, usage: null };
+        // Two fetches close together can both start from the same count (the
+        // first's result isn't rendered yet); keep only what's really new.
+        const fresh = delta.slice(Math.max(0, prev.messages.length - since));
         const next = {
-          messages: delta.length ? [...prev.messages, ...delta] : prev.messages,
+          messages: fresh.length ? [...prev.messages, ...fresh] : prev.messages,
           ready: !!r?.ready,
           usage: r?.usage || prev.usage,
         };
@@ -1357,7 +1360,9 @@ export default function App() {
     let v = null;
     try {
       const api = termApi.current[tabId];
-      if (api && api.alive() && api.bottom) v = readScreen(api.bottom());
+      // 24 rows: Claude Code's working line can sit above its to-do list,
+      // the input box and the status line.
+      if (api && api.alive() && api.bottom) v = readScreen(api.bottom(24));
     } catch { v = null; }
     screenCache.current[tabId] = { t: now, v };
     return v;
@@ -1524,8 +1529,31 @@ export default function App() {
     // Switching tabs re-follows the live end.
     stickRef.current = true;
     setUnstuck(false);
+    setHeldNew(false);
   }, [activeId]);
+  // Auto-follow the live end, with one exception: when a background task
+  // reports back after Claude has answered you, Claude's reply to it starts a
+  // second answer below yours. Following that would scroll your answer off the
+  // top, so it looks as if nothing came before. Instead stop where you are
+  // (your answer stays put) and show a "New reply below" button; you scroll
+  // down yourself. Sending your next message follows the live end again.
+  const followRef = useRef({ tab: null, id: null });
+  const [heldNew, setHeldNew] = useState(false);
   useEffect(() => {
+    const prev = followRef.current;
+    followRef.current = { tab: activeId, id: latestId };
+    const newTurn = prev.tab === activeId && !!prev.id && !!latestId && prev.id !== latestId;
+    if (newTurn && latestTurn?.isNotif && stickRef.current && askedId && askedId !== latestId) {
+      stickRef.current = false;
+      setUnstuck(true);
+      setHeldNew(true);
+      return;
+    }
+    if (newTurn && !latestTurn?.isNotif && heldNew) {
+      stickRef.current = true;
+      setUnstuck(false);
+      setHeldNew(false);
+    }
     if (stickRef.current && feedRef.current) {
       feedRef.current.scrollTop = feedRef.current.scrollHeight;
     }
@@ -1536,6 +1564,7 @@ export default function App() {
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     stickRef.current = atBottom;
     setUnstuck(!atBottom);
+    if (atBottom) setHeldNew(false);
   }
   // Open the turn that launched a background task and scroll to it.
   function jumpToStep(toolUseId) {
@@ -1564,6 +1593,7 @@ export default function App() {
   function jumpToLatest() {
     stickRef.current = true;
     setUnstuck(false);
+    setHeldNew(false);
     if (feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight;
   }
 
@@ -2021,9 +2051,10 @@ export default function App() {
                   )}
                 </AgentPanel>
               )}
+              <span className="sr-only" role="status" aria-live="polite">{heldNew ? "New reply below" : ""}</span>
               {unstuck && (
-                <button className="jump-bottom" onClick={jumpToLatest} title="Follow the latest activity">
-                  <Icon name="chevron" size={12} /> Latest
+                <button className={"jump-bottom" + (heldNew ? " new" : "")} onClick={jumpToLatest} title={heldNew ? "Jump to the new reply" : "Follow the latest activity"}>
+                  <Icon name="chevron" size={12} /> {heldNew ? "New reply below" : "Latest"}
                 </button>
               )}
               {(() => {

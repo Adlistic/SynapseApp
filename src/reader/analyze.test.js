@@ -205,3 +205,17 @@ test("a message sent while Claude was working shows as what the user typed", () 
     ["go", false], ["and the sidebar", true], ["remove the footer too?\nit's my mail", true],
   ]);
 });
+
+test("a background task reporting back mid-run stays inside the answer", () => {
+  const turns = groupTurns([
+    msg("user", "fix it"), msg("message", "Starting."),
+    msg("user", "<task-notification><summary>Background command \"build\" completed</summary></task-notification>", { midTurn: true }),
+    msg("message", "Build passed, all done."),
+    msg("user", "<task-notification><summary>Agent \"QA\" finished</summary></task-notification>"),
+    msg("message", "QA passed too."),
+  ]);
+  assert.deepEqual(turns.map((t) => [t.prompt, !!t.isNotif, t.responses.length]), [
+    ["fix it", false, 3],
+    ['Agent "QA" finished', true, 1],
+  ]);
+});

@@ -425,9 +425,12 @@
   height: 30px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--r-hair-2);
   background: var(--panel); color: var(--r-read); font: inherit; font-size: calc(var(--fs-sm) * var(--reader-scale, 1)); font-weight: 600;
   box-shadow: 0 10px 30px -8px rgba(0, 0, 0, 0.6);
+  white-space: nowrap; width: max-content; max-width: calc(100% - 32px);
 }
 .convo-col .jump-bottom:hover { filter: none; background: var(--panel-2); }
 .convo-col .jump-bottom .ico { transform: rotate(90deg); }
+/* held: a reply to a background task arrived below your answer */
+.convo-col .jump-bottom.new { border-color: var(--r-link); color: var(--r-link); }
 
 /* ── diffs inside a step ─────────────────────────────────────────────────── */
 .step-diff .diff { margin: 0; border: 1px solid var(--r-hair); border-radius: 9px; background: var(--r-code-bg); }

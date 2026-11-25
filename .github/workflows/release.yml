@@ -1,6 +1,6 @@
 name: release
 
-# Build, sign, and publish the Synapse desktop app + updater manifest on tag.
+# Build, sign, and publish the HyperVoice Code desktop app + updater manifest on tag.
 # Tag a version to ship:  git tag v0.1.0 && git push origin v0.1.0
 on:
   push:
@@ -49,7 +49,7 @@ jobs:
           $v = "${{ github.ref_name }}" -replace '^v',''
           $md = Get-Content CHANGELOG.md -Raw
           $m = [regex]::Match($md, "(?s)## \[$([regex]::Escape($v))\][^`n]*`n(.*?)(?=`n## \[|$)")
-          $body = if ($m.Success) { $m.Groups[1].Value.Trim() } else { "Synapse $v" }
+          $body = if ($m.Success) { $m.Groups[1].Value.Trim() } else { "HyperVoice Code $v" }
           $delim = "NOTES_EOF_$(Get-Random)"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "body<<$delim"
           Add-Content -Path $env:GITHUB_OUTPUT -Value $body
@@ -88,7 +88,7 @@ jobs:
           # Publishes the NSIS .exe + latest.json (the updater manifest the app
           # polls at releases/latest/download/latest.json).
           tagName: ${{ github.ref_name }}
-          releaseName: "Synapse ${{ github.ref_name }}"
+          releaseName: "HyperVoice Code ${{ github.ref_name }}"
           releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false

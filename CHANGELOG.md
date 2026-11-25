@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] — 2026-11-25
+
+### Changed
+- **Your answer stays in view when a background task replies.** If a background job reports back after Claude has answered you, the conversation no longer scrolls your answer away to show Claude's reply to the job. It stops where you are and shows a "New reply below" button; scroll down or click it when you're ready. Your next message follows the live end again.
+
+### Fixed
+- A background job that reported back while Claude was still answering split the answer in two, with the rest of it under a "Background task" heading. It now stays one answer, with the job's report as a step inside it.
+- A session could show a grey "idle" dot while Claude was still working: during long thinking, or while it wrote a large file (that step only appears in the transcript once it is fully written). If the terminal shows Claude's working timer, the session now shows as working, whatever the transcript says.
+- Messages could occasionally show twice in the conversation when updates arrived very close together.
+
 ## [0.3.3] — 2026-11-24
 
 **Coming from Synapse 0.2.x?** Synapse is now **HyperVoice Code**, and it's **free**: no sign-in and no HyperVoice plan needed. Your settings, open tabs and pins carry over. Since 0.2.12 it has also gained Codex support, zoom and text size (Ctrl+scroll), a "talk instead of typing" card for HyperVoice dictation, and the changes below. (0.3.1 and 0.3.2 went out through the Microsoft Store only.)

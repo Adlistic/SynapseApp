@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { HvPromoRail, HvPromoChip, HvEmptyHint } from "./HvPromo.jsx";
 import { APP_ZOOM, TERM_FONT, READER_ZOOM, stepValue, pct, applyAppZoom } from "./textsize.js";
 import { createPortal } from "react-dom";
@@ -1566,6 +1566,13 @@ export default function App() {
     setUnstuck(!atBottom);
     if (atBottom) setHeldNew(false);
   }
+  // The background-work strip takes its own row under the feed, so the feed
+  // gets shorter when it appears. If you were following the live end, stay there.
+  const stripShown = bgRunning.length > 0;
+  // Layout effect: re-pin before paint, so the last line never flashes clipped.
+  useLayoutEffect(() => {
+    if (stickRef.current && feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight;
+  }, [stripShown]);
   // Open the turn that launched a background task and scroll to it.
   function jumpToStep(toolUseId) {
     const t = turns.find((x) => x.responses.some((m) => m.toolUseId === toolUseId));

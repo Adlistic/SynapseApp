@@ -198,6 +198,19 @@ pub fn parse_entry(entry: &Value, ts: i64, agent_id: Option<&str>) -> Vec<Messag
         return out;
     }
 
+    // When Claude Code compacts the conversation it saves its summary of the
+    // earlier conversation as a user message (`isCompactSummary`). Nobody typed
+    // it and Claude Code's own UI doesn't show it as a message; shown as one it
+    // became a "You" turn with no reply, which pushed Claude's real last answer
+    // up into a collapsed turn.
+    if entry
+        .get("isCompactSummary")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return out;
+    }
+
     // A prompt typed while Claude was working. Claude Code records it as a
     // `queued_command` attachment (no `message`), and hands it to the model
     // wrapped in boilerplate; the reader shows just what the user typed.
@@ -636,6 +649,14 @@ mod tests {
         let m = parse_line(line, 1, None);
         assert_eq!(m[0].kind, MessageKind::ToolResult);
         assert_eq!(m[0].text, "[image]");
+    }
+
+    #[test]
+    fn compaction_summary_is_not_a_user_message() {
+        let line = r#"{"type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context."}}"#;
+        assert!(parse_line(line, 1, None).is_empty());
+        let typed = r#"{"type":"user","message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context."}}"#;
+        assert_eq!(parse_line(typed, 1, None).len(), 1);
     }
 
     #[test]

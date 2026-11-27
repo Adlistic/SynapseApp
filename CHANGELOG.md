@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5] — 2026-11-27
+
+### Fixed
+- **Claude's last answer could hide after the conversation was compacted.** When Claude Code compacts a long conversation it saves a summary of it, and HyperVoice Code showed that summary as a message from you with "No written reply". Being the newest turn, it stayed open while Claude's real answer was folded away above it. The summary is no longer shown as a message, so the answer is the last thing in the conversation again, as in Claude Code itself.
+- **The "background task running" bar no longer covers the conversation.** It used to float over the last lines of the conversation; it now has its own row underneath, like the "another session needs you" bar at the top.
+
 ## [0.3.4] — 2026-11-25
 
 ### Changed

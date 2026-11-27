@@ -525,14 +525,16 @@
 .convo-col:not([data-accents="off"]) .narr-md strong { color: var(--rc-bold); opacity: 0.9; }
 
 /* ── background work strip ───────────────────────────────────────────────── */
+/* It takes its own row under the conversation (like the "another session needs
+   you" bar at the top) instead of floating over it, so it never covers text. */
 .bg-strip {
-  position: absolute; left: 16px; right: 16px; bottom: 12px; z-index: 5;
+  position: relative; flex-shrink: 0; margin: 0 16px; z-index: 5; overflow: hidden;
   display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 6px 8px 6px 12px;
   background: color-mix(in srgb, var(--panel) 92%, transparent); backdrop-filter: blur(8px);
   border: 1px solid color-mix(in srgb, var(--r-green) 30%, var(--r-hair-2)); border-radius: 12px;
   box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.55);
 }
-.bg-lead { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; font-size: calc(var(--fs-sm) * var(--reader-scale, 1)); font-weight: 600; white-space: nowrap; }
+.bg-lead { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 1; min-width: 0; font-size: calc(var(--fs-sm) * var(--reader-scale, 1)); font-weight: 600; white-space: nowrap; }
 .bg-chips { display: flex; gap: 6px; min-width: 0; overflow: hidden; flex: 1; justify-content: flex-end; }
 .bg-chip {
   display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 220px; height: 24px; padding: 0 10px;
@@ -544,7 +546,11 @@
 .bg-chip .ico { flex-shrink: 0; }
 .bg-more { align-self: center; flex-shrink: 0; font-size: calc(var(--fs-sm) * var(--reader-scale, 1)); color: var(--r-muted); font-variant-numeric: tabular-nums; }
 .bg-chip:hover { color: var(--r-read); border-color: var(--r-hair-2); }
+.bg-lead .shimmer { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .convo-col:has(.bg-strip) .jump-bottom { bottom: 60px; }
+/* The strip no longer floats over the feed, so the feed needn't keep clear of it
+   (a notice card still floats, so keep the room while one shows). */
+.convo-col:has(.bg-strip):not(:has(.notice-card)) .feed-uni { padding-bottom: 24px; }
 .pulse.sm { width: 6px; height: 6px; margin-right: 6px; vertical-align: 1px; }
 .step-sum.pending { display: inline-flex; align-items: center; }
 @container reader (max-width: 400px) { .bg-chips { display: none; } }

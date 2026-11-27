@@ -1,6 +1,6 @@
 [package]
 name = "hypervoice-code"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 description = "HyperVoice Code — a workspace for Claude Code and Codex"
 authors = ["Chris Cousens"]
